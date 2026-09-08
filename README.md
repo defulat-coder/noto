@@ -2,7 +2,11 @@
 
 一个原生 macOS 小记与待办应用。一个输入入口，本地保存；需要时交给已安装的 AI CLI 整理。
 
-## 运行
+## 下载与安装
+
+在 [GitHub Releases](https://github.com/defulat-coder/noto/releases) 下载 DMG，打开后把 Noto 拖到 Applications。Apple 芯片选 arm64，Intel 选 x86_64。当前预览版标有 `unnotarized`，尚未 Apple 公证，系统可能阻止打开。正式签名与自动发布配置见 [发布说明](RELEASE.md)。
+
+## 从源码运行
 
 需要 macOS 14+、Xcode/Swift 6 工具链。
 

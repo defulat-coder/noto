@@ -1,6 +1,14 @@
 #!/bin/zsh
 set -eu
 cd "${0:A:h:h}"
+VERSION=${VERSION:-$(<VERSION)}
+BUILD_NUMBER=${BUILD_NUMBER:-1}
+export VERSION BUILD_NUMBER
+python3 - <<'CHECK'
+import os,re
+assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",os.environ["VERSION"]), "VERSION must be X.Y.Z"
+assert re.fullmatch(r"[1-9][0-9]*",os.environ["BUILD_NUMBER"]), "BUILD_NUMBER must be positive"
+CHECK
 swift build -c release
 BIN=$(swift build -c release --show-bin-path)
 APP="$PWD/build/Noto.app"
@@ -27,5 +35,15 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST
-codesign --force --deep --sign - "$APP"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
+cp .build/checkouts/GRDB.swift/LICENSE "$APP/Contents/Resources/GRDB-LICENSE.txt"
+cp .build/checkouts/swift-argument-parser/LICENSE.txt "$APP/Contents/Resources/ArgumentParser-LICENSE.txt"
+# This app has no nested executable code; sign the app after copying resources.
+if [[ -n "${SIGNING_IDENTITY:-}" ]]; then
+    codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP"
+else
+    codesign --force --sign - "$APP"
+fi
+codesign --verify --deep --strict "$APP"
 echo "$APP"

@@ -2,3 +2,7 @@
 .swiftpm/
 build/
 .DS_Store
+dist/
+*.p12
+*.p8
+*.keychain-db
