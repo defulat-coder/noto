@@ -1,0 +1,827 @@
+import SwiftUI
+import AppKit
+import NotoCore
+
+@MainActor
+final class AppModel: ObservableObject {
+    @Published var entries: [Entry] = []
+    @Published var draft = ""
+    @Published var search = "" { didSet { if search != oldValue { reload(reset: true) } } }
+    @Published var hasMore = false
+    @Published var loadingMore = false
+    @Published var message = ""
+    @Published var isError = false
+    @Published var busy = false
+    @Published var conversation: Entry?
+    @Published var messages: [ChatMessage] = []
+    @Published var chatDraft = ""
+    @Published var chatError = ""
+    @Published var editing: Entry?
+    @Published var editError = ""
+    @Published var settings = false
+    @Published var undoAvailable = false
+    @Published var provider: Provider { didSet { UserDefaults.standard.set(provider.rawValue, forKey: "provider") } }
+    private(set) var store: Store?
+    let preview: Bool
+    private var undoBefore: [Entry] = []
+    private var undoAfter: [Entry] = []
+    private var runner: AgentRunner?
+    private var timer: Timer?
+    private var dataVersion: Int?
+    private let pageSize = 40
+    private var chatDrafts: [String: String] = [:]
+
+    init() {
+        preview = CommandLine.arguments.contains("--preview")
+        provider = Provider(rawValue: UserDefaults.standard.string(forKey: "provider") ?? "opencode") ?? .opencode
+        do {
+            store = try Store(url: preview ? nil : Store.defaultURL)
+            if preview {
+                _ = try store?.add(kind: "todo", text: "整理草图", due: Self.dateKey(Calendar.current.date(byAdding: .day, value: 1, to: Date())!))
+                _ = try store?.add(kind: "note", text: "今天想清楚了产品方向。")
+                draft = "记一下，今天想清楚了产品方向。明天下午把草图整理好。"
+                message = "已记下，并添加了明天的待办。"
+                undoAfter = try store?.list() ?? []; undoAvailable = true
+            }
+        } catch { store = nil; message = "无法打开数据：\(error.localizedDescription)"; isError = true }
+        reload()
+        timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshIfChanged() }
+        }
+    }
+
+    static func dateKey(_ date: Date) -> String {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: date)
+    }
+    var filtered: [Entry] { entries }
+    struct DayGroup: Identifiable {
+        let id: String
+        let date: Date
+        var entries: [Entry]
+        var label: String {
+            if Calendar.current.isDateInToday(date) { return "今天" }
+            if Calendar.current.isDateInYesterday(date) { return "昨天" }
+            let f = DateFormatter(); f.dateFormat = Calendar.current.component(.year, from: date) == Calendar.current.component(.year, from: Date()) ? "M月d日" : "yyyy年M月d日"
+            return f.string(from: date)
+        }
+        var shortLabel: String {
+            let f = DateFormatter(); f.dateFormat = Calendar.current.component(.year, from: date) == Calendar.current.component(.year, from: Date()) ? "MM.dd" : "yy.MM.dd"
+            return f.string(from: date)
+        }
+    }
+    var groups: [DayGroup] {
+        var result: [DayGroup] = []
+        for entry in entries {
+            let key = Self.dateKey(entry.createdAt)
+            if result.last?.id == key { result[result.count - 1].entries.append(entry) }
+            else { result.append(DayGroup(id: key, date: entry.createdAt, entries: [entry])) }
+        }
+        return result
+    }
+    func reload(reset: Bool = false) {
+        do {
+            guard let store else { return }
+            let version = try store.dataVersion()
+            let page = try store.page(limit: reset ? pageSize : max(pageSize, entries.count), search: search)
+            if page.entries != entries { entries = page.entries }
+            hasMore = page.hasMore
+            dataVersion = version
+        } catch { fail(error) }
+    }
+    func refreshIfChanged() {
+        do { if let version = try store?.dataVersion(), version != dataVersion { reload() } }
+        catch { fail(error) }
+    }
+    func loadMore() {
+        guard hasMore, !loadingMore, let cursor = entries.last, let store else { return }
+        loadingMore = true
+        do {
+            let page = try store.page(before: cursor, limit: pageSize, search: search)
+            entries.append(contentsOf: page.entries)
+            hasMore = page.hasMore
+        } catch { fail(error) }
+        loadingMore = false
+    }
+    func fail(_ error: Error) { message = error.localizedDescription; isError = true }
+    func remember(before: [Entry], after: [Entry], message: String) {
+        undoBefore = before; undoAfter = after; undoAvailable = !after.isEmpty
+        self.message = message; isError = false; reload()
+    }
+    func save(todo: Bool = false) {
+        guard !busy, let store else { return }
+        var content = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return }
+        let isTodo = todo || content.hasPrefix("/todo ") || content.hasPrefix("待办：")
+        if content.hasPrefix("/todo ") { content = String(content.dropFirst(6)) }
+        if content.hasPrefix("待办：") { content = String(content.dropFirst(3)) }
+        do {
+            let entry = try store.add(kind: isTodo ? "todo" : "note", text: content)
+            draft = ""; remember(before: [], after: [entry], message: isTodo ? "已添加待办。" : "已记下。")
+        } catch { fail(error) }
+    }
+    func toggle(_ entry: Entry) {
+        guard let store else { return }
+        do {
+            let changed = try store.setCompleted(id: entry.id, completed: !entry.completed)
+            remember(before: [entry], after: [changed], message: changed.completed ? "完成了一件事。" : "已重新打开。")
+        } catch { fail(error) }
+    }
+    func update(_ entry: Entry, text: String, due: String?) {
+        do {
+            if let changed = try store?.update(id: entry.id, text: text, due: due) {
+                remember(before: [entry], after: [changed], message: "已更新。")
+                editing = nil
+            }
+        } catch { editError = error.localizedDescription }
+    }
+    func undo() {
+        guard undoAvailable else { return }
+        do { try store?.undo(before: undoBefore, after: undoAfter); undoAvailable = false; message = "已撤销。"; isError = false; reload() }
+        catch { fail(error) }
+    }
+    func ask() {
+        guard !busy, let store else { return }
+        let input = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else { return }
+        do {
+            if let conversation { chatDrafts[conversation.id] = chatDraft }
+            conversation = try store.startConversation(input)
+            messages = try store.messages(for: conversation!.id)
+            draft = ""; chatDraft = ""; chatError = ""; message = ""; reload()
+            requestReply()
+        } catch { fail(error) }
+    }
+    func openConversation(_ entry: Entry) {
+        guard !busy else { return }
+        do {
+            messages = try store?.messages(for: entry.id) ?? []
+            if let conversation { chatDrafts[conversation.id] = chatDraft }
+            conversation = entry; chatDraft = chatDrafts[entry.id] ?? ""; chatError = ""
+        } catch { fail(error) }
+    }
+    func closeConversation() {
+        guard !busy else { return }
+        if let conversation { chatDrafts[conversation.id] = chatDraft }
+        conversation = nil
+        DispatchQueue.main.async { NotificationCenter.default.post(name: .focusComposer, object: nil) }
+    }
+    func sendChat() {
+        guard !busy, messages.last?.role != "user", let conversation, let store else { return }
+        do {
+            try store.appendQuestion(chatDraft, to: conversation.id)
+            chatDraft = ""; messages = try store.messages(for: conversation.id)
+            requestReply()
+        } catch { chatError = error.localizedDescription }
+    }
+    func requestReply() {
+        guard !busy, let store, let question = messages.last, question.role == "user" else { return }
+        let history = Array(messages.dropLast()), context = filtered
+        let selectedProvider = provider
+        let active = AgentRunner(); runner = active
+        busy = true; chatError = ""
+        let startedAt = Date()
+        recordExecution("已读取 \(history.count) 条历史消息与 \(context.count) 条笔记", for: question)
+        Task {
+            do {
+                let response = try await Task.detached(priority: .userInitiated) {
+                    try active.run(prompt: question.text, entries: context, provider: selectedProvider, history: history) { event in
+                        Task { @MainActor in self.recordExecution(event, for: question) }
+                    }
+                }.value
+                let changed = try store.apply(response.actions, expected: context, replyingTo: question, reply: response.message)
+                if !changed.isEmpty { remember(before: context, after: changed, message: "已更新记录。") }
+                messages = try store.messages(for: question.entryID)
+                recordExecution("已保存回复\(changed.isEmpty ? "" : "，更新 \(changed.count) 条记录") · \(Int(Date().timeIntervalSince(startedAt))) 秒", for: question)
+                reload()
+            } catch {
+                chatError = error.localizedDescription
+                recordExecution("未完成：\(error.localizedDescription)", for: question)
+            }
+            busy = false; runner = nil
+        }
+    }
+    func recordExecution(_ event: String, for question: ChatMessage) {
+        do {
+            let previous = messages.first(where: { $0.id == question.id })?.execution ?? ""
+            try store?.setExecution(previous.isEmpty ? event : previous + "\n" + event, for: question)
+            messages = try store?.messages(for: question.entryID) ?? messages
+        } catch { chatError = "执行过程保存失败：\(error.localizedDescription)" }
+    }
+    func cancel() { runner?.cancel() }
+}
+
+@main
+struct NotoApp: App {
+    @StateObject private var model = AppModel()
+    var body: some Scene {
+        Window("noto", id: "main") {
+            ContentView(model: model)
+                .frame(minWidth: 620, minHeight: 480)
+                .onAppear {
+                    if model.preview && CommandLine.arguments.contains("--dark") { NSApp.appearance = NSAppearance(named: .darkAqua) }
+                    NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)
+                    DispatchQueue.main.async {
+                        if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) ?? NSApp.keyWindow {
+                            window.titleVisibility = .hidden
+                            window.titlebarAppearsTransparent = true
+                            window.titlebarSeparatorStyle = .none
+                            window.styleMask.insert(.fullSizeContentView)
+                            window.isMovableByWindowBackground = true
+                            window.backgroundColor = NSColor.textBackgroundColor
+                            if model.preview { window.setContentSize(NSSize(width: 1340, height: 954)); window.center() }
+                        }
+                        NotificationCenter.default.post(name: .focusComposer, object: nil)
+                    }
+                }
+        }
+        .defaultSize(width: 1180, height: 820)
+        .windowStyle(.hiddenTitleBar)
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("新建小记") { model.closeConversation() }.keyboardShortcut("n")
+                Button("交给 AI") {
+                    if (NSApp.keyWindow?.firstResponder as? InputTextView)?.isChatInput == true { model.sendChat() }
+                    else { model.ask() }
+                }.keyboardShortcut(.return, modifiers: .command).disabled(model.busy)
+                Button("添加待办") { model.save(todo: true) }.keyboardShortcut(.return, modifiers: [.command, .shift])
+            }
+            CommandGroup(replacing: .undoRedo) {
+                Button("撤销文本编辑") { NSApp.sendAction(Selector(("undo:")), to: nil, from: nil) }.keyboardShortcut("z")
+                Button("重做文本编辑") { NSApp.sendAction(Selector(("redo:")), to: nil, from: nil) }.keyboardShortcut("z", modifiers: [.command, .option])
+                Button("撤销上次记录操作") { model.undo() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!model.undoAvailable)
+            }
+            CommandGroup(after: .textEditing) {
+                Button("搜索记录") {
+                    model.closeConversation()
+                    DispatchQueue.main.async { NotificationCenter.default.post(name: .focusSearch, object: nil) }
+                }.keyboardShortcut("k")
+            }
+            CommandGroup(replacing: .appSettings) {
+                Button("设置…") { model.settings = true }.keyboardShortcut(",")
+            }
+        }
+    }
+}
+
+extension Notification.Name {
+    static let focusComposer = Notification.Name("noto.focusComposer")
+    static let focusSearch = Notification.Name("noto.focusSearch")
+    static let focusChat = Notification.Name("noto.focusChat")
+}
+
+// Shared native tokens. Semantic colors follow macOS appearance and contrast.
+private enum NotoDesign {
+    static let canvas = Color(nsColor: .textBackgroundColor)
+    static let field = Color(nsColor: .controlBackgroundColor)
+    static let line = Color(nsColor: .separatorColor).opacity(0.6)
+    static let body = Font.system(size: 15)
+    static let caption = Font.system(size: 12)
+    static let radius: CGFloat = 12
+}
+
+private struct QuietButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var enabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 6).padding(.vertical, 5)
+            .background(configuration.isPressed ? Color.primary.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .opacity(enabled ? 1 : 0.4)
+            .scaleEffect(configuration.isPressed && !reduceMotion && NSApp.currentEvent?.type == .leftMouseDown ? 0.97 : 1)
+            .contentShape(Rectangle())
+    }
+}
+
+struct ContentView: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("datesExpanded") private var datesExpanded = false
+    @State private var activeDay: String?
+    var body: some View {
+        GeometryReader { geometry in
+            let compactChat = geometry.size.width < 980 && model.conversation != nil
+            let chatWidth = min(440, max(340, geometry.size.width * 0.37))
+            let railWidth: CGFloat = datesExpanded ? (geometry.size.width < 800 ? 144 : 180) : 88
+            HStack(spacing: 0) {
+                if !compactChat {
+                    ScrollViewReader { proxy in
+                        HStack(spacing: 0) {
+                            if !model.entries.isEmpty {
+                                DateRail(model: model, expanded: datesExpanded, activeDay: activeDay, maxHeight: geometry.size.height, width: railWidth) { id in
+                                    activeDay = id
+                                    proxy.scrollTo("content-" + id, anchor: .top)
+                                }
+                            }
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 0) {
+                                    composer
+                                    if model.search.isEmpty && model.entries.isEmpty {
+                                        emptyState(title: "留下一点今天。", detail: "想法记成小记，要做的事添加为待办。\n从上面写下第一句话开始。", symbol: "square.and.pencil")
+                                    } else if !model.search.isEmpty && model.entries.isEmpty {
+                                        emptyState(title: "没有找到相关记录", detail: "试试更短的关键词，也可以搜索对话里的内容。", symbol: "magnifyingglass")
+                                        Button("清空搜索") { model.search = "" }.buttonStyle(QuietButtonStyle()).font(NotoDesign.caption).padding(.top, 12)
+                                    } else {
+                                        if !model.search.isEmpty {
+                                            HStack {
+                                                Text("搜索结果").font(.system(size: 13, weight: .medium))
+                                                Spacer()
+                                                Text("\(model.entries.count)\(model.hasMore ? "+" : "") 条记录").font(NotoDesign.caption).foregroundStyle(.secondary)
+                                            }.padding(.top, 32)
+                                        }
+                                        LazyVStack(alignment: .leading, spacing: 32) {
+                                            ForEach(model.groups) { group in
+                                                VStack(alignment: .leading, spacing: 12) {
+                                                    HStack(spacing: 12) {
+                                                        Text(group.label).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+                                                        Rectangle().fill(NotoDesign.line).frame(height: 0.5)
+                                                    }
+                                                    VStack(spacing: 4) {
+                                                        ForEach(group.entries) { entry in EntryRow(entry: entry, model: model) }
+                                                    }
+                                                }
+                                                .id("content-" + group.id)
+                                                .background(GeometryReader { frame in
+                                                    Color.clear.preference(key: DayPositions.self, value: [group.id: frame.frame(in: .named("history")).minY])
+                                                })
+                                            }
+                                            if model.hasMore {
+                                                Button("加载更早的记录") { model.loadMore() }
+                                                    .buttonStyle(QuietButtonStyle()).font(NotoDesign.caption).foregroundStyle(.secondary)
+                                                    .frame(maxWidth: .infinity).padding(.vertical, 12)
+                                                    .onAppear { model.loadMore() }
+                                            }
+                                        }.padding(.top, model.search.isEmpty ? 40 : 24)
+                                    }
+                                }
+                                .frame(maxWidth: 620, alignment: .leading)
+                                .padding(.horizontal, geometry.size.width < 1000 || model.conversation != nil ? 24 : 48)
+                                .padding(.top, max(40, min(92, geometry.size.height * 0.16 - 48)))
+                                .padding(.bottom, 40)
+                                .id("composer")
+                                .frame(maxWidth: .infinity)
+                            }
+                            .coordinateSpace(name: "history")
+                            .onPreferenceChange(DayPositions.self) { positions in
+                                let sorted = positions.sorted { $0.value < $1.value }
+                                if let id = (sorted.last(where: { $0.value <= 56 }) ?? sorted.first)?.key, activeDay != id { activeDay = id }
+                            }
+                            .padding(.top, 48)
+                        }
+                        .onReceive(NotificationCenter.default.publisher(for: .focusComposer)) { _ in
+                            model.search = ""
+                            proxy.scrollTo("composer", anchor: .top)
+                        }
+                        .onChange(of: model.search) { _, _ in
+                            activeDay = model.groups.first?.id
+                            proxy.scrollTo("composer", anchor: .top)
+                        }
+                    }
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        if !model.message.isEmpty { feedback.padding(.horizontal, 24).padding(.bottom, 16) }
+                    }
+                    .overlay(alignment: .top) {
+                        HStack {
+                            Button {
+                                withAnimation(reduceMotion ? nil : .timingCurve(0.23, 1, 0.32, 1, duration: 0.18)) { datesExpanded.toggle() }
+                            } label: { Image(systemName: "sidebar.left").font(.system(size: 15)).frame(width: 20, height: 20) }
+                                .buttonStyle(QuietButtonStyle()).foregroundStyle(.secondary).disabled(model.entries.isEmpty)
+                                .help(datesExpanded ? "收起日期侧栏" : "展开日期侧栏")
+                                .accessibilityLabel(datesExpanded ? "收起日期侧栏" : "展开日期侧栏")
+                            Spacer()
+                            SearchInput(text: $model.search).frame(width: 190, height: 28)
+                        }.padding(.leading, 86).padding(.trailing, 20).padding(.top, 10)
+                    }
+                }
+                if model.conversation != nil {
+                    if !compactChat { Divider() }
+                    ConversationView(model: model)
+                        .frame(width: compactChat ? geometry.size.width : chatWidth)
+                }
+            }
+        }
+        .background(NotoDesign.canvas)
+        .foregroundStyle(.primary)
+        .ignoresSafeArea(.container, edges: .top)
+        .onExitCommand {
+            if !model.search.isEmpty { model.search = "" }
+            else { model.closeConversation() }
+        }
+        .sheet(isPresented: $model.settings) { SettingsView(model: model) }
+        .sheet(item: $model.editing) { entry in EditView(entry: entry, model: model) }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in model.cancel() }
+    }
+    private func emptyState(title: String, detail: String, symbol: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Image(systemName: symbol).font(.system(size: 22, weight: .light)).foregroundStyle(.secondary).accessibilityHidden(true)
+            Text(title).font(.system(size: 17, weight: .medium))
+            Text(detail).font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(5)
+        }.padding(.top, 60)
+    }
+    private var feedback: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: model.isError ? "exclamationmark.circle" : "checkmark.circle")
+                .foregroundStyle(model.isError ? Color.red : Color.secondary)
+            Text(model.message).font(NotoDesign.caption).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            if model.undoAvailable { Button("撤销") { model.undo() }.buttonStyle(QuietButtonStyle()).help("撤销上次记录操作（⌘⇧Z）") }
+            Button { model.message = "" } label: { Image(systemName: "xmark").frame(width: 18, height: 18) }
+                .buttonStyle(QuietButtonStyle()).accessibilityLabel("关闭操作提示")
+        }.font(NotoDesign.caption).padding(10)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(NotoDesign.line, lineWidth: 0.5))
+            .frame(maxWidth: 620)
+    }
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .bottom, spacing: 12) {
+                Composer(text: $model.draft, enabled: !model.busy, onSubmit: { useAI in useAI ? model.ask() : model.save() })
+                    .frame(minHeight: 32).layoutPriority(1)
+                Button { model.save() } label: {
+                    Image(systemName: "arrow.up.circle.fill").font(.system(size: 24)).frame(width: 28, height: 28)
+                }.buttonStyle(QuietButtonStyle()).foregroundStyle(Color.accentColor)
+                    .help("记录（回车）").accessibilityLabel("记录")
+                    .disabled(model.busy || model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .padding(16)
+            .background(NotoDesign.field, in: RoundedRectangle(cornerRadius: NotoDesign.radius))
+            .overlay(RoundedRectangle(cornerRadius: NotoDesign.radius).stroke(NotoDesign.line, lineWidth: 0.5))
+            HStack(spacing: 6) {
+                Text("↵ 记录").foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Button { model.save(todo: true) } label: { Label("待办", systemImage: "checkmark.square") }
+                    .help("添加待办（⌘⇧ 回车）")
+                Button { model.ask() } label: { Label("交给 AI", systemImage: "sparkles") }
+                    .help("交给 AI（⌘ 回车）")
+            }.font(NotoDesign.caption).buttonStyle(QuietButtonStyle()).foregroundStyle(.secondary)
+                .disabled(model.busy || model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .padding(.horizontal, 4)
+        }
+    }
+}
+
+struct ConversationView: View {
+    @ObservedObject var model: AppModel
+    private var pending: Bool { model.messages.last?.role == "user" }
+    private var status: String {
+        if model.busy { return "正在回复" }
+        if !model.chatError.isEmpty { return "回复未完成" }
+        if pending { return "等待重试" }
+        if !model.chatDraft.isEmpty { return "草稿未发送" }
+        return "对话已保存"
+    }
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("对话").font(.system(size: 17, weight: .semibold))
+                    Text(status).font(NotoDesign.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button { model.closeConversation() } label: { Image(systemName: "xmark").frame(width: 18, height: 18) }
+                    .buttonStyle(QuietButtonStyle()).help(model.busy ? "停止回复后可关闭" : "关闭对话（Esc）").accessibilityLabel("关闭对话").disabled(model.busy)
+            }.padding(.horizontal, 24).padding(.top, 54).padding(.bottom, 20)
+            Divider().padding(.horizontal, 24)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 28) {
+                        ForEach(model.messages) { message in
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack {
+                                    Text(message.role == "user" ? "你" : "AI").font(.system(size: 12, weight: .medium))
+                                    Spacer()
+                                    Text(message.createdAt, style: .time).font(.system(size: 11)).monospacedDigit()
+                                }.foregroundStyle(.secondary)
+                                Text((try? AttributedString(markdown: message.text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(message.text))
+                                    .font(NotoDesign.body).lineSpacing(4).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                                if let execution = message.execution {
+                                    DisclosureGroup {
+                                        Text(execution).font(NotoDesign.caption).lineSpacing(5).foregroundStyle(.secondary).textSelection(.enabled)
+                                            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+                                    } label: {
+                                        Text(model.busy && message.id == model.messages.last?.id ? "执行中…" : "执行过程").font(NotoDesign.caption).foregroundStyle(.secondary)
+                                    }.padding(.top, 4)
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        if model.busy {
+                            HStack(spacing: 10) { ProgressView().controlSize(.small); Text("正在整理，完成后显示回复…").font(NotoDesign.caption).foregroundStyle(.secondary) }
+                        }
+                        if !model.chatError.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Label("这次回复没有完成", systemImage: "exclamationmark.circle").font(.system(size: 13, weight: .medium))
+                                Text(model.chatError).font(NotoDesign.caption).textSelection(.enabled)
+                                Text("问题已保存，可以重试。").font(NotoDesign.caption).foregroundStyle(.secondary)
+                            }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                        }
+                        Color.clear.frame(height: 1).id("chat-bottom")
+                    }.padding(24)
+                }
+                .onChange(of: model.messages.count) { _, _ in proxy.scrollTo("chat-bottom", anchor: .bottom) }
+                .onChange(of: model.busy) { _, busy in
+                    proxy.scrollTo("chat-bottom", anchor: .bottom)
+                    if !busy && !pending { NotificationCenter.default.post(name: .focusChat, object: nil) }
+                }
+                .onAppear { proxy.scrollTo("chat-bottom", anchor: .bottom) }
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                if pending && !model.busy {
+                    HStack {
+                        Text("上一条问题还没有回复").font(NotoDesign.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button("重试") { model.requestReply() }.buttonStyle(.bordered)
+                    }
+                }
+                Composer(text: $model.chatDraft, enabled: !model.busy && !pending, onSubmit: { _ in model.sendChat() }, isChat: true)
+                    .frame(minHeight: 40).fixedSize(horizontal: false, vertical: true)
+                    .padding(14).background(NotoDesign.field, in: RoundedRectangle(cornerRadius: NotoDesign.radius))
+                    .overlay(RoundedRectangle(cornerRadius: NotoDesign.radius).stroke(NotoDesign.line, lineWidth: 0.5))
+                HStack {
+                    Text("↵ 发送 · ⇧↵ 换行").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Spacer()
+                    if model.busy {
+                        Button { model.cancel() } label: { Label("停止", systemImage: "stop.fill") }.buttonStyle(QuietButtonStyle())
+                    } else {
+                        Button { model.sendChat() } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 22)).frame(width: 24, height: 24) }
+                            .buttonStyle(QuietButtonStyle()).foregroundStyle(Color.accentColor).help("发送消息（回车）").accessibilityLabel("发送消息")
+                            .disabled(pending || model.chatDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }.font(NotoDesign.caption)
+            }.padding(.horizontal, 24).padding(.bottom, 20).padding(.top, 12)
+        }.background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+private struct DayPositions: PreferenceKey {
+    static var defaultValue: [String: CGFloat] = [:]
+    static func reduce(value: inout [String: CGFloat], nextValue: () -> [String: CGFloat]) { value.merge(nextValue(), uniquingKeysWith: { _, new in new }) }
+}
+
+struct DateRail: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let expanded: Bool
+    let activeDay: String?
+    let maxHeight: CGFloat
+    let width: CGFloat
+    let navigate: (String) -> Void
+    var body: some View {
+        let selectedID = model.groups.contains(where: { $0.id == activeDay }) ? activeDay : model.groups.first?.id
+        VStack(alignment: .leading, spacing: 16) {
+            if expanded { Text("日期").font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 20) }
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: expanded ? 6 : 2) {
+                        ForEach(model.groups) { group in
+                            let selected = selectedID == group.id
+                            Button { navigate(group.id) } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "minus").font(.system(size: selected ? 13 : 9, weight: selected ? .semibold : .regular)).frame(width: 16)
+                                    Text(expanded ? "\(group.shortLabel)  \(group.label == "今天" || group.label == "昨天" ? group.label : "")" : group.shortLabel)
+                                        .font(.system(size: expanded ? 13 : 11, weight: selected ? .medium : .regular)).monospacedDigit()
+                                    if expanded { Spacer(minLength: 0) }
+                                }
+                                .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                                .frame(height: expanded ? 32 : 28)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, expanded ? 10 : 0)
+                                .background(expanded && selected ? Color.accentColor.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 6))
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain).id(group.id)
+                            .help(group.id).accessibilityLabel("跳到 \(group.id)")
+                            .accessibilityAddTraits(selected ? .isSelected : [])
+                        }
+                        if model.hasMore {
+                            Button("更早") { model.loadMore() }.buttonStyle(.plain).font(.system(size: 10)).foregroundStyle(.secondary)
+                                .padding(.vertical, 8)
+                        }
+                    }.padding(.horizontal, expanded ? 10 : 14)
+                }
+                .scrollIndicators(.hidden)
+                .onChange(of: activeDay) { _, id in
+                    if let id { proxy.scrollTo(id, anchor: .center) }
+                }
+            }
+            .frame(maxHeight: expanded ? .infinity : min(400, maxHeight * 0.6))
+        }
+        .padding(.top, expanded ? 58 : 0)
+        .frame(width: width)
+        .frame(maxHeight: .infinity, alignment: expanded ? .topLeading : .center)
+        .background(expanded ? Color.primary.opacity(0.018) : Color.clear)
+    }
+}
+
+struct EntryRow: View {
+    let entry: Entry
+    @ObservedObject var model: AppModel
+    private var overdue: Bool { !entry.completed && (entry.due.map { $0 < AppModel.dateKey(Date()) } ?? false) }
+    var dueLabel: String {
+        guard let due = entry.due else { return "" }
+        if due == AppModel.dateKey(Date()) { return "今天到期" }
+        if due == AppModel.dateKey(Calendar.current.date(byAdding: .day, value: 1, to: Date())!) { return "明天到期" }
+        return overdue ? "已逾期 · \(due)" : due
+    }
+    private func edit() { model.editError = ""; model.editing = entry }
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            if entry.kind == "todo" {
+                Toggle("完成待办", isOn: Binding(get: { entry.completed }, set: { _ in model.toggle(entry) }))
+                    .toggleStyle(.checkbox).labelsHidden().padding(.top, 3)
+                    .accessibilityLabel("\(entry.completed ? "重新打开" : "完成")：\(entry.text)")
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                Text(entry.text).font(NotoDesign.body).lineSpacing(4)
+                    .strikethrough(entry.completed).foregroundStyle(entry.completed ? .secondary : .primary)
+                    .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .onTapGesture(count: 2) { if entry.hasConversation { model.openConversation(entry) } else { edit() } }
+                HStack(spacing: 8) {
+                    Text(entry.createdAt, style: .time).font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary)
+                    if entry.due != nil {
+                        Text(dueLabel).font(.system(size: 11)).foregroundStyle(overdue ? Color.orange : Color.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    if entry.hasConversation {
+                        Button { model.openConversation(entry) } label: { Label("对话", systemImage: "bubble.left.and.bubble.right").font(.system(size: 11)) }
+                            .buttonStyle(QuietButtonStyle()).foregroundStyle(model.conversation?.id == entry.id ? Color.accentColor : Color.secondary)
+                            .help("打开对话").accessibilityLabel("打开对话").disabled(model.busy)
+                    }
+                    Button(action: edit) { Image(systemName: "pencil").font(.system(size: 12)).frame(width: 16, height: 18) }
+                        .buttonStyle(QuietButtonStyle()).foregroundStyle(.secondary).help("编辑记录").accessibilityLabel("编辑记录")
+                }
+            }
+        }
+        .padding(12)
+        .background(model.conversation?.id == entry.id ? Color.accentColor.opacity(0.055) : .clear, in: RoundedRectangle(cornerRadius: 8))
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button("编辑", action: edit)
+            Button("复制") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(entry.text, forType: .string) }
+            if entry.hasConversation { Button("打开对话") { model.openConversation(entry) }.disabled(model.busy) }
+        }
+    }
+}
+
+struct Composer: NSViewRepresentable {
+    @Binding var text: String
+    let enabled: Bool
+    let onSubmit: (Bool) -> Void
+    var isChat = false
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.drawsBackground = false; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
+        let view = InputTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 32))
+        view.isChatInput = isChat
+        view.delegate = context.coordinator; view.isRichText = false; view.drawsBackground = false
+        view.allowsUndo = true
+        view.font = .systemFont(ofSize: 16); view.textColor = .labelColor
+        view.textContainerInset = NSSize(width: 0, height: 2)
+        view.textContainer?.lineFragmentPadding = 0
+        view.isAutomaticQuoteSubstitutionEnabled = false
+        view.isAutomaticDashSubstitutionEnabled = false
+        view.isVerticallyResizable = true; view.isHorizontallyResizable = false
+        view.autoresizingMask = [.width]
+        view.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        view.textContainer?.widthTracksTextView = true
+        view.placeholder = isChat ? "继续聊…" : "记点什么，或者让 AI 帮你整理。"
+        view.setAccessibilityLabel(isChat ? "继续对话" : "记录或向 AI 提问")
+        context.coordinator.view = view
+        context.coordinator.observer = NotificationCenter.default.addObserver(forName: isChat ? .focusChat : .focusComposer, object: nil, queue: .main) { [weak view] _ in view?.window?.makeFirstResponder(view) }
+        if isChat { DispatchQueue.main.async { [weak view] in view?.window?.makeFirstResponder(view) } }
+        scroll.documentView = view
+        return scroll
+    }
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        guard let view = scroll.documentView as? NSTextView else { return }
+        context.coordinator.parent = self
+        if view.string != text {
+            view.string = text; view.undoManager?.removeAllActions()
+            view.scrollRangeToVisible(NSRange(location: 0, length: 0))
+        }
+        view.isEditable = enabled; view.needsDisplay = true
+    }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
+        let width = proposal.width ?? 600
+        let bounds = (text.isEmpty ? " " : text) as NSString
+        let rect = bounds.boundingRect(with: NSSize(width: max(40, width), height: .greatestFiniteMagnitude), options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: NSFont.systemFont(ofSize: 16)])
+        return CGSize(width: width, height: min(isChat ? 120 : 160, max(32, ceil(rect.height) + 6)))
+    }
+    class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: Composer
+        weak var view: NSTextView?
+        var observer: NSObjectProtocol?
+        init(_ parent: Composer) { self.parent = parent }
+        deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+        func textDidChange(_ notification: Notification) { parent.text = view?.string ?? ""; view?.needsDisplay = true }
+        func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                if textView.hasMarkedText() { return false }
+                if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { return false }
+                parent.onSubmit(NSApp.currentEvent?.modifierFlags.contains(.command) == true)
+                return true
+            }
+            return false
+        }
+    }
+}
+
+struct SearchInput: NSViewRepresentable {
+    @Binding var text: String
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+    func makeNSView(context: Context) -> NSSearchField {
+        let view = NSSearchField()
+        view.sendsSearchStringImmediately = true
+        view.sendsWholeSearchString = false
+        view.controlSize = .regular
+        view.placeholderString = "搜索笔记与对话"; view.font = .systemFont(ofSize: 13)
+        view.delegate = context.coordinator; view.setAccessibilityLabel("搜索")
+        context.coordinator.observer = NotificationCenter.default.addObserver(forName: .focusSearch, object: nil, queue: .main) { [weak view] _ in view?.window?.makeFirstResponder(view) }
+        return view
+    }
+    func updateNSView(_ view: NSSearchField, context: Context) { context.coordinator.parent = self; if view.stringValue != text { view.stringValue = text } }
+    class Coordinator: NSObject, NSSearchFieldDelegate {
+        var parent: SearchInput
+        var observer: NSObjectProtocol?
+        init(_ parent: SearchInput) { self.parent = parent }
+        deinit { if let observer { NotificationCenter.default.removeObserver(observer) } }
+        func controlTextDidChange(_ obj: Notification) { if let field = obj.object as? NSTextField { parent.text = field.stringValue } }
+    }
+}
+
+class InputTextView: NSTextView {
+    var isChatInput = false
+    var placeholder = ""
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        if string.isEmpty {
+            (placeholder as NSString).draw(at: NSPoint(x: 0, y: 3), withAttributes: [.font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.placeholderTextColor])
+        }
+    }
+}
+
+struct EditView: View {
+    let entry: Entry
+    @ObservedObject var model: AppModel
+    @State private var text: String
+    @State private var hasDue: Bool
+    @State private var dueDate: Date
+    @FocusState private var textFocused: Bool
+    init(entry: Entry, model: AppModel) {
+        self.entry = entry; self.model = model
+        _text = State(initialValue: entry.text)
+        _hasDue = State(initialValue: entry.due != nil)
+        let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd"
+        _dueDate = State(initialValue: entry.due.flatMap { formatter.date(from: $0) } ?? Date())
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text(entry.kind == "todo" ? "编辑待办" : "编辑小记").font(.system(size: 17, weight: .semibold))
+            TextEditor(text: $text).font(NotoDesign.body).scrollContentBackground(.hidden)
+                .padding(10).frame(height: 160).background(NotoDesign.field, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(NotoDesign.line, lineWidth: 0.5))
+                .focused($textFocused).accessibilityLabel("记录内容")
+            if entry.kind == "todo" {
+                HStack {
+                    Toggle("截止日期", isOn: $hasDue).toggleStyle(.checkbox)
+                    Spacer()
+                    if hasDue { DatePicker("日期", selection: $dueDate, displayedComponents: .date).labelsHidden().accessibilityLabel("截止日期") }
+                    else { Text("未设置").font(NotoDesign.caption).foregroundStyle(.secondary) }
+                }
+            }
+            if !model.editError.isEmpty {
+                Label(model.editError, systemImage: "exclamationmark.circle").foregroundStyle(.red).font(NotoDesign.caption).fixedSize(horizontal: false, vertical: true)
+            }
+            Divider()
+            HStack {
+                Text("⌘↵ 保存").font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+                Button("取消") { model.editing = nil }.keyboardShortcut(.cancelAction)
+                Button("保存") { model.update(entry, text: text, due: hasDue ? AppModel.dateKey(dueDate) : nil) }
+                    .keyboardShortcut(.return, modifiers: .command).buttonStyle(.borderedProminent)
+                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }.padding(28).frame(width: 440)
+            .onAppear { model.editError = ""; textFocused = true }
+    }
+}
+
+struct SettingsView: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Text("设置").font(.system(size: 17, weight: .semibold))
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("AI CLI", selection: $model.provider) {
+                    ForEach(Provider.allCases) { provider in Text(provider.title).tag(provider) }
+                }
+                Text("使用本机已安装并登录的 AI CLI。\n更改后，将在下一轮对话中使用。").font(NotoDesign.caption).foregroundStyle(.secondary).lineSpacing(4)
+            }
+            Divider()
+            HStack { Spacer(); Button("完成") { model.settings = false }.keyboardShortcut(.defaultAction) }
+        }.padding(28).frame(width: 340)
+            .onExitCommand { model.settings = false }
+    }
+}

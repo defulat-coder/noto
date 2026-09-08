@@ -1,0 +1,12 @@
+[0/1] Planning build
+[1/1] Compiling plugin GenerateManual
+[2/2] Compiling plugin GenerateDoccReference
+Building for production...
+[2/6] Write sources
+[3/6] Write swift-version--58304C5D6DBC2206.txt
+[5/6] Compiling NotoApp NotoApp.swift
+[5/7] Write Objects.LinkFileList
+[6/7] Linking NotoDesktop
+Build complete! (6.75s)
+/Users/xbjt/Documents/myself/noto/build/Noto.app: replacing existing signature
+/Users/xbjt/Documents/myself/noto/build/Noto.app
