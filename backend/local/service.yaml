@@ -1,0 +1,19 @@
+# PUBLIC LOCAL FIXTURE credentials; never use this configuration in production.
+replication:
+  connections:
+    - type: postgresql
+      uri: postgresql://noto_replication:noto-local-replication-only@supabase_db_noto:5432/postgres
+      sslmode: disable
+storage:
+  type: postgresql
+  uri: postgresql://postgres:postgres@supabase_db_noto:5432/noto_powersync_storage
+  sslmode: disable
+port: 8080
+sync_config:
+  path: /config/sync-rules.yaml
+client_auth:
+  jwks_uri: http://supabase_kong_noto:8000/auth/v1/.well-known/jwks.json
+  allow_local_jwks: true
+  audience: [authenticated]
+telemetry:
+  disable_telemetry_sharing: true

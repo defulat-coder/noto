@@ -18,7 +18,7 @@ struct Noto: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "noto", abstract: "Local notes and todos, for people and agents.", version: "0.1.0", subcommands: [Note.self, Todo.self, Search.self, Export.self, Conversation.self, Doctor.self, Ask.self])
 }
 struct Note: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Read and write notes.", subcommands: [AddNote.self, ListNotes.self, UpdateNote.self])
+    static let configuration = CommandConfiguration(abstract: "Read and write notes.", subcommands: [AddNote.self, ListNotes.self, UpdateNote.self, ConvertToTodo.self])
 }
 struct Todo: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Manage todos.", subcommands: [AddTodo.self, ListTodos.self, Complete.self, Reopen.self, UpdateTodo.self])
@@ -36,19 +36,21 @@ struct AddTodo: ParsableCommand {
     @Option var title: String
     @Option(help: "Due date YYYY-MM-DD (does not schedule a timed notification).") var due: String?
     @Option var requestId: String?
-    func run() throws { try printJSON(output.store().add(kind: "todo", text: title, due: due, requestID: requestId)) }
+    @Option(help: "pending, in_progress or completed") var status = "pending"
+    @Option(help: "normal or important") var priority = "normal"
+    func run() throws { try printJSON(output.store().add(kind: "todo", text: title, due: due, requestID: requestId, status: status, priority: priority)) }
 }
 struct ListNotes: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list")
     @OptionGroup var output: OutputOptions
-    func run() throws { try printJSON(output.store().list().filter { $0.kind == "note" }) }
+    func run() throws { try printJSON(output.store().list(kind: "note")) }
 }
 struct ListTodos: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list")
     @OptionGroup var output: OutputOptions
-    @Option(help: "all, open or completed") var status = "all"
-    func validate() throws { guard ["all", "open", "completed"].contains(status) else { throw ValidationError("status must be all, open or completed") } }
-    func run() throws { try printJSON(output.store().list().filter { $0.kind == "todo" && (status == "all" || $0.completed == (status == "completed")) }) }
+    @Option(help: "all, open (pending + in_progress), pending, in_progress or completed") var status = "all"
+    @Option(help: "normal or important; omitted means all") var priority: String?
+    func run() throws { try printJSON(output.store().todos(status: status, priority: priority)) }
 }
 struct Complete: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "complete")
@@ -69,8 +71,7 @@ struct UpdateNote: ParsableCommand {
     @Option var text: String
     func run() throws {
         let store = try output.store()
-        guard try store.list().contains(where: { $0.id == id && $0.kind == "note" }) else { throw ValidationError("note id not found") }
-        try printJSON(store.update(id: id, text: text, due: nil))
+        try printJSON(store.updateNote(id: id, text: text))
     }
 }
 struct UpdateTodo: ParsableCommand {
@@ -79,13 +80,20 @@ struct UpdateTodo: ParsableCommand {
     @Option var id: String
     @Option var title: String?
     @Option var due: String?
+    @Option(help: "pending, in_progress or completed") var status: String?
+    @Option(help: "normal or important") var priority: String?
     @Flag var clearDue = false
     func validate() throws { if clearDue && due != nil { throw ValidationError("Use either --due or --clear-due") } }
     func run() throws {
         let store = try output.store()
-        guard let entry = try store.list().first(where: { $0.id == id && $0.kind == "todo" }) else { throw ValidationError("todo id not found") }
-        try printJSON(store.update(id: id, text: title ?? entry.text, due: clearDue ? nil : (due ?? entry.due)))
+        try printJSON(store.updateTodo(id: id, text: title, due: due, clearDue: clearDue, status: status, priority: priority))
     }
+}
+struct ConvertToTodo: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "convert-to-todo", abstract: "Convert a note in place, preserving its ID and conversation.")
+    @OptionGroup var output: OutputOptions
+    @Option var id: String
+    func run() throws { try printJSON(output.store().convertToTodo(id: id)) }
 }
 struct Search: ParsableCommand {
     @OptionGroup var output: OutputOptions
@@ -102,13 +110,9 @@ struct Export: ParsableCommand {
     @OptionGroup var output: OutputOptions
     @Flag var includeConversations = false
     func run() throws {
-        let store = try output.store(), entries = try store.list()
-        if includeConversations {
-            struct Backup: Encodable { let entries: [Entry]; let conversations: [String: [ChatMessage]] }
-            var conversations: [String: [ChatMessage]] = [:]
-            for entry in entries where entry.hasConversation { conversations[entry.id] = try store.messages(for: entry.id) }
-            try printJSON(Backup(entries: entries, conversations: conversations))
-        } else { try printJSON(entries) }
+        let store = try output.store()
+        if includeConversations { try printJSON(store.backup()) }
+        else { try printJSON(store.list()) }
     }
 }
 struct Doctor: ParsableCommand {

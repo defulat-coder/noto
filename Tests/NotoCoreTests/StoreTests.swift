@@ -1,4 +1,5 @@
 import XCTest
+import GRDB
 @testable import NotoCore
 
 final class StoreTests: XCTestCase {
@@ -85,4 +86,77 @@ final class StoreTests: XCTestCase {
         let response = try AgentRunner.decode("```json\n{\"message\":\"已记下\",\"actions\":[]}\n```")
         XCTAssertEqual(response.actions.count, 0)
     }
+    func testFilteredNotesAtomicUpdateAndSnapshotBackup() throws {
+        let store = try Store(url: nil)
+        let note = try store.startConversation("原问题")
+        let question = try XCTUnwrap(store.messages(for: note.id).first)
+        _ = try store.apply([], replyingTo: question, reply: "回答")
+        let task = try store.add(kind: "todo", text: "任务")
+        XCTAssertEqual(try store.list(kind: "note").map(\.id), [note.id])
+        XCTAssertThrowsError(try store.updateNote(id: task.id, text: "不能修改任务"))
+        XCTAssertThrowsError(try store.updateNote(id: "missing", text: "不存在"))
+        let changed = try store.updateNote(id: note.id, text: "新标题")
+        XCTAssertTrue(changed.hasConversation)
+        let backup = try store.backup()
+        XCTAssertEqual(backup.entries, try store.list())
+        XCTAssertEqual(backup.conversations[note.id], try store.messages(for: note.id))
+        XCTAssertEqual(backup.conversations.count, 1)
+    }
+
+    func testAgentCancellationStopsCLIThatIgnoresTerminate() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appendingPathComponent("fake-cli")
+        let ready = directory.appendingPathComponent("ready")
+        try "#!/bin/sh\ntrap '' TERM\ntouch '\(ready.path)'\nexec /bin/sleep 30\n".write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let runner = AgentRunner()
+        let running = Task.detached { try runner.run(prompt: "test", entries: [], provider: .claude, executable: executable.path) }
+        let deadline = Date().addingTimeInterval(3)
+        while !FileManager.default.fileExists(atPath: ready.path), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ready.path))
+        let start = Date()
+        runner.cancel()
+        do { _ = try await running.value; XCTFail("Cancelled CLI must not produce a response") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("取消")) }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+    }
+
+    func testDesktopLockWaitIsBoundedAndDoesNotLoseData() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("notes.sqlite")
+        let store = try Store(url: url, busyTimeout: 0.1)
+        let blocker = try DatabaseQueue(path: url.path)
+        try blocker.writeWithoutTransaction { db in
+            try db.execute(sql: "BEGIN IMMEDIATE")
+            defer { try? db.execute(sql: "ROLLBACK") }
+            let start = Date()
+            XCTAssertThrowsError(try store.add(kind: "note", text: "待重试草稿"))
+            XCTAssertLessThan(Date().timeIntervalSince(start), 1)
+        }
+        XCTAssertTrue(try store.list().isEmpty)
+        _ = try store.add(kind: "note", text: "待重试草稿")
+        XCTAssertEqual(try store.list().count, 1)
+    }
+
+    func testPooledReadersKeepExternalChangeDetectionStable() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("notes.sqlite")
+        let store = try Store(url: url), external = try Store(url: url)
+        let version = try store.dataVersion()
+        _ = try store.add(kind: "note", text: "本地写入")
+        for _ in 0..<10 {
+            _ = try store.page(); _ = try store.todos()
+            XCTAssertEqual(try store.dataVersion(), version)
+        }
+        _ = try external.add(kind: "note", text: "外部写入")
+        XCTAssertNotEqual(try store.dataVersion(), version)
+        XCTAssertEqual(try store.page().entries.count, 2)
+    }
+
 }

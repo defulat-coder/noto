@@ -1,0 +1,14 @@
+{
+  "name": "noto-backend-contract-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node tests/contract.mjs",
+    "test:live": "node tests/live.mjs"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.3.14",
+    "@powersync/node": "1.0.0",
+    "better-sqlite3": "12.11.1"
+  }
+}

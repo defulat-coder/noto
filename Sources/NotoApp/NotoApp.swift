@@ -1,14 +1,34 @@
 import SwiftUI
 import AppKit
 import NotoCore
+import NotoSync
+import Combine
 
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var entries: [Entry] = []
+    @Published var entries: [Entry] = [] { didSet { cachedGroups = nil } }
+    @Published var tasks: [Entry] = [] { didSet { invalidateTaskViews() } }
+    @Published var mode: ContentMode = .notes { didSet { if persistsViewMode { UserDefaults.standard.set(mode.rawValue, forKey: "contentMode") } } }
+    @Published var selectedCalendarDate = Date()
+    @Published var calendarUnscheduled = false
+    @Published var taskDraftStarted = false
+    @Published var importantOnly = false { didSet { invalidateTaskViews() } }
+    @Published var completedLimit = 20
+    @Published var taskCreating = false
+    @Published var taskDraft = ""
+    @Published var taskDraftStatus = "pending"
+    @Published var taskDraftImportant = false
+    @Published var taskDraftHasDue = false
+    @Published var taskDraftDate = Date()
+    @Published var editStatus = "pending"
+    @Published var editImportant = false
+    @Published var convertedTaskID: String?
+    @Published var highlightedTaskID: String?
+    var taskToEditAfterReload: String?
     @Published var draft = ""
     @Published var composerPosition: CGPoint?
     @Published var readingRequested = true
-    @Published var search = "" { didSet { if search != oldValue { reload(reset: true) } } }
+    @Published var search = "" { didSet { if search != oldValue { completedLimit = 20; reload(reset: true, debounce: true) } } }
     @Published var hasMore = false
     @Published var loadingMore = false
     @Published var message = ""
@@ -18,7 +38,7 @@ final class AppModel: ObservableObject {
     @Published var messages: [ChatMessage] = []
     @Published var chatDraft = ""
     @Published var chatError = ""
-    @Published var editing: Entry?
+    @Published var editing: Entry? { didSet { cachedGroups = nil } }
     @Published var editError = ""
     @Published var editDraft = ""
     @Published var editHasDue = false
@@ -27,39 +47,155 @@ final class AppModel: ObservableObject {
     @Published var undoAvailable = false
     @Published var provider: Provider { didSet { UserDefaults.standard.set(provider.rawValue, forKey: "provider") } }
     private(set) var store: Store?
+    @Published private(set) var sync: SyncController?
+    @Published private(set) var lastDeletedTaskID: String?
+    private var syncSubscriptions = Set<AnyCancellable>()
     let preview: Bool
+    private let persistsViewMode: Bool
     private var undoBefore: [Entry] = []
     private var undoAfter: [Entry] = []
     private var runner: AgentRunner?
     private var timer: Timer?
     private var dataVersion: Int?
+    private(set) var reloadTask: Task<Void, Never>?
+    private var startupTask: Task<Void, Never>?
+    @Published private(set) var opening = false
+    private var pollTask: Task<Void, Never>?
+    private var loadTask: Task<Void, Never>?
+    private var reloadGeneration = 0
+    @Published private(set) var reloading = false
     private let pageSize = 40
     private var chatDrafts: [String: String] = [:]
 
     init(store injectedStore: Store? = nil) {
         preview = injectedStore == nil && CommandLine.arguments.contains("--preview")
+        persistsViewMode = injectedStore == nil && !CommandLine.arguments.contains("--preview") && ProcessInfo.processInfo.environment["NOTO_DATABASE"] == nil
         provider = Provider(rawValue: UserDefaults.standard.string(forKey: "provider") ?? "opencode") ?? .opencode
-        do {
-            store = try injectedStore ?? Store(url: preview ? nil : Store.defaultURL)
-            if preview {
-                _ = try store?.add(kind: "todo", text: "整理草图", due: Self.dateKey(Calendar.current.date(byAdding: .day, value: 1, to: Date())!))
-                _ = try store?.add(kind: "note", text: "今天想清楚了产品方向。")
-                draft = "记一下，今天想清楚了产品方向。明天下午把草图整理好。"
-                message = "已记下，并添加了明天的待办。"
-                undoAfter = try store?.list() ?? []; undoAvailable = true
-            }
-        } catch { store = nil; message = "无法打开数据：\(error.localizedDescription)"; isError = true }
-        reload()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshIfChanged() }
+        if injectedStore != nil || preview {
+            do {
+                store = try injectedStore ?? Store(url: preview ? nil : Store.defaultURL)
+                if preview {
+                    _ = try store?.add(kind: "todo", text: "整理草图", due: Self.dateKey(Calendar.current.date(byAdding: .day, value: 1, to: Date())!))
+                    _ = try store?.add(kind: "note", text: "今天想清楚了产品方向。")
+                    _ = try store?.add(kind: "todo", text: "梳理任务看板的交互细节", status: "in_progress", priority: "important")
+                    _ = try store?.add(kind: "todo", text: "完成第一轮设计讨论", status: "completed")
+                    draft = "记一下，今天想清楚了产品方向。明天下午把草图整理好。"
+                    message = "已记下，并添加了明天的待办。"
+                    undoAfter = try store?.list() ?? []; undoAvailable = true
+                }
+            } catch { store = nil; message = "无法打开数据：\(error.localizedDescription)"; isError = true }
         }
+        if !preview && injectedStore == nil { mode = ContentMode(rawValue: UserDefaults.standard.string(forKey: "contentMode") ?? "") ?? .notes }
+        if preview || ProcessInfo.processInfo.environment["NOTO_DATABASE"] != nil {
+            if CommandLine.arguments.contains("--calendar") { mode = .calendar }
+            if CommandLine.arguments.contains("--board") { mode = .board }
+        }
+        if let store {
+            if !preview { attachSync(to: store) }
+            reload()
+        }
+        else if !isError {
+            opening = true
+            startupTask = Task { [weak self] in
+                do {
+                    let store = try await Task.detached(priority: .userInitiated) {
+                        let url = ProcessInfo.processInfo.environment["NOTO_DATABASE"].map { URL(fileURLWithPath: $0) } ?? Store.localURL
+                        return try Store(url: url, busyTimeout: 0.1)
+                    }.value
+                    guard let self else { return }
+                    self.store = store; self.attachSync(to: store)
+                    if ProcessInfo.processInfo.environment["NOTO_DATABASE"] == nil { await self.sync?.restoreSession() }
+                    self.opening = false; self.reload()
+                } catch {
+                    self?.opening = false; self?.fail(error)
+                }
+            }
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in if NSApp.isActive { self?.refreshIfChanged() } }
+        }
+        timer?.tolerance = 0.5
+    }
+
+    private func attachSync(to store: Store) {
+        let controller = SyncController(localStore: store)
+        sync = controller
+        controller.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &syncSubscriptions)
+        controller.$store.dropFirst().sink { [weak self] store in
+            self?.replaceAccountStore(store)
+        }.store(in: &syncSubscriptions)
+        controller.$dataRevision.dropFirst().sink { [weak self] _ in
+            // Sync writes use our own connection, so PRAGMA data_version cannot detect them.
+            self?.reload()
+        }.store(in: &syncSubscriptions)
+    }
+
+    func canChangeSyncAccount() -> Bool {
+        guard !busy else { fail(NotoError("请先停止 AI 回复，再切换账号。")); return false }
+        guard draft.isEmpty, chatDraft.isEmpty, !chatDrafts.contains(where: { $0.key != conversation?.id && !$0.value.isEmpty }),
+              !taskDraftStarted || !taskDraftDirty else {
+            fail(NotoError("还有未保存的内容或对话草稿。请先保存、发送或清空草稿，再切换账号。"))
+            return false
+        }
+        return leaveUnchangedEditor()
+    }
+
+    func replaceAccountStore(_ replacement: Store) {
+        guard store !== replacement else { return }
+        reloadTask?.cancel(); pollTask?.cancel(); loadTask?.cancel()
+        reloadGeneration += 1; dataVersion = nil
+        store = replacement
+        entries = []; tasks = []; messages = []; conversation = nil; chatDrafts = [:]
+        undoBefore = []; undoAfter = []; undoAvailable = false; lastDeletedTaskID = nil
+        editing = nil; editDraft = ""; editError = ""; draft = ""; chatDraft = ""; chatError = ""
+        taskCreating = false; taskDraftStarted = false; taskDraft = ""; taskDraftHasDue = false; taskDraftImportant = false
+        taskDraftStatus = "pending"; convertedTaskID = nil; highlightedTaskID = nil; taskToEditAfterReload = nil
+        composerPosition = nil; readingRequested = true; message = ""; isError = false
+        importantOnly = false; completedLimit = 20; hasMore = false
+        if search.isEmpty { reload(reset: true) } else { search = "" }
+    }
+
+    func deleteTask(_ entry: Entry) {
+        guard !busy, leaveUnchangedEditor(), let store else { return }
+        let unsentQuestion = conversation?.id == entry.id ? chatDraft : chatDrafts[entry.id] ?? ""
+        if !unsentQuestion.isEmpty {
+            fail(NotoError("请先发送或清空这条任务的对话草稿。")); return
+        }
+        do {
+            try store.deleteTodo(id: entry.id, expected: entry)
+            lastDeletedTaskID = entry.id
+            if conversation?.id == entry.id { conversation = nil; messages = []; chatDraft = ""; readingRequested = true }
+            chatDrafts.removeValue(forKey: entry.id)
+            message = "已删除任务，可恢复上次删除。"; isError = false; reload()
+        } catch { fail(error) }
+    }
+
+    func restoreLastDeletedTask() {
+        guard let id = lastDeletedTaskID, let store else { return }
+        do {
+            try store.restoreTodo(id: id); lastDeletedTaskID = nil
+            message = "已恢复任务。"; isError = false; reload()
+        } catch { fail(error) }
     }
 
     static func dateKey(_ date: Date) -> String {
-        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: date)
+        let parts = TaskDates.local.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", parts.year!, parts.month!, parts.day!)
     }
-    var filtered: [Entry] { entries }
+
+    private var cachedGroups: [DayGroup]?
+    private var groupsTimeZone = TimeZone.current
+    var cachedVisibleTasks: [Entry]?
+    var cachedCalendarTasks: [Entry]?
+    var cachedCalendarGroups: [String: [Entry]]?
+    var cachedTaskColumns: [String: [Entry]]?
+    private func invalidateTaskViews() {
+        cachedVisibleTasks = nil; cachedCalendarTasks = nil
+        cachedCalendarGroups = nil; cachedTaskColumns = nil
+    }
+
+    var filtered: [Entry] { mode.isTaskView ? visibleTasks : entries }
     struct DayGroup: Identifiable {
         let id: String
         let date: Date
@@ -67,67 +203,133 @@ final class AppModel: ObservableObject {
         var label: String {
             if Calendar.current.isDateInToday(date) { return "今天" }
             if Calendar.current.isDateInYesterday(date) { return "昨天" }
-            let f = DateFormatter(); f.dateFormat = Calendar.current.component(.year, from: date) == Calendar.current.component(.year, from: Date()) ? "M月d日" : "yyyy年M月d日"
-            return f.string(from: date)
+            let parts = Calendar.current.dateComponents([.year, .month, .day], from: date)
+            let prefix = parts.year == Calendar.current.component(.year, from: Date()) ? "" : "\(parts.year!)年"
+            return "\(prefix)\(parts.month!)月\(parts.day!)日"
         }
         var shortLabel: String {
-            let f = DateFormatter(); f.dateFormat = Calendar.current.component(.year, from: date) == Calendar.current.component(.year, from: Date()) ? "MM.dd" : "yy.MM.dd"
-            return f.string(from: date)
+            let parts = Calendar.current.dateComponents([.year, .month, .day], from: date)
+            let prefix = parts.year == Calendar.current.component(.year, from: Date()) ? "" : String(format: "%02d.", parts.year! % 100)
+            return prefix + String(format: "%02d.%02d", parts.month!, parts.day!)
         }
     }
     var groups: [DayGroup] {
+        if groupsTimeZone != .current { cachedGroups = nil; groupsTimeZone = .current }
+        if let cachedGroups { return cachedGroups }
         var result: [DayGroup] = []
         var visible = entries
         // Keep an active editor reachable if an external change removes its search match.
         if let editing, !visible.contains(where: { $0.id == editing.id }) {
             visible.append(editing)
-            visible.sort { $0.createdAt == $1.createdAt ? $0.id > $1.id : $0.createdAt > $1.createdAt }
+            visible.sort { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt > $1.createdAt }
         }
         for entry in visible {
             let key = Self.dateKey(entry.createdAt)
             if result.last?.id == key { result[result.count - 1].entries.append(entry) }
             else { result.append(DayGroup(id: key, date: entry.createdAt, entries: [entry])) }
         }
+        cachedGroups = result
         return result
     }
-    func reload(reset: Bool = false) {
-        do {
-            guard let store else { return }
-            let version = try store.dataVersion()
-            let page = try store.page(limit: reset ? pageSize : max(pageSize, entries.count), search: search)
-            if page.entries != entries { entries = page.entries }
-            hasMore = page.hasMore
-            dataVersion = version
-        } catch { fail(error) }
+    deinit {
+        timer?.invalidate()
+        startupTask?.cancel(); reloadTask?.cancel(); pollTask?.cancel(); loadTask?.cancel()
+    }
+
+    func reload(reset: Bool = false, debounce: Bool = false) {
+        reloadTask?.cancel(); loadTask?.cancel(); loadingMore = false
+        reloadGeneration += 1
+        guard let store else { return }
+        let generation = reloadGeneration, query = search, taskView = mode.isTaskView
+        let limit = reset ? pageSize : max(pageSize, entries.count)
+        reloading = true
+        reloadTask = Task { [weak self] in
+            do {
+                if debounce && !query.isEmpty { try await Task.sleep(for: .milliseconds(200)) }
+                try Task.checkCancellation()
+                let result = try await Task.detached(priority: .userInitiated) {
+                    // Read the version first: a concurrent commit will be caught on the next poll.
+                    let version = try store.dataVersion()
+                    let page = taskView ? nil : try store.page(limit: limit, search: query)
+                    let tasks = taskView ? try store.todos(search: query) : nil
+                    return (version, page, tasks)
+                }.value
+                try Task.checkCancellation()
+                guard let self, generation == self.reloadGeneration else { return }
+                if let page = result.1 {
+                    if page.entries != self.entries { self.entries = page.entries }
+                    self.hasMore = page.hasMore
+                }
+                if let tasks = result.2, tasks != self.tasks { self.tasks = tasks }
+                self.dataVersion = result.0
+                self.reloading = false
+                if let id = self.taskToEditAfterReload {
+                    self.taskToEditAfterReload = nil
+                    if self.mode == .board, self.highlightedTaskID == id,
+                       let task = self.tasks.first(where: { $0.id == id }) { self.beginEditing(task) }
+                }
+            } catch is CancellationError {
+                // The newer request owns the loading state and results.
+            } catch {
+                guard let self, generation == self.reloadGeneration else { return }
+                self.reloading = false; self.fail(error)
+            }
+        }
     }
     func refreshIfChanged() {
-        do { if let version = try store?.dataVersion(), version != dataVersion { reload() } }
-        catch { fail(error) }
+        guard pollTask == nil, !reloading, let store else { return }
+        let generation = reloadGeneration
+        pollTask = Task { [weak self] in
+            defer { self?.pollTask = nil }
+            do {
+                let version = try await Task.detached(priority: .utility) { try store.dataVersion() }.value
+                guard let self, generation == self.reloadGeneration else { return }
+                if version != self.dataVersion { self.reload() }
+            } catch { self?.fail(error) }
+        }
+    }
+    // Also useful for callers that need to act on the newly loaded snapshot.
+    func waitForReload() async {
+        await startupTask?.value
+        await pollTask?.value
+        await reloadTask?.value
+        await loadTask?.value
     }
     func loadMore() {
-        guard hasMore, !loadingMore, let cursor = entries.last, let store else { return }
+        guard hasMore, !loadingMore, !reloading, let cursor = entries.last, let store else { return }
         loadingMore = true
-        do {
-            let page = try store.page(before: cursor, limit: pageSize, search: search)
-            entries.append(contentsOf: page.entries)
-            hasMore = page.hasMore
-        } catch { fail(error) }
-        loadingMore = false
+        let generation = reloadGeneration, query = search, limit = pageSize
+        loadTask = Task { [weak self] in
+            do {
+                let page = try await Task.detached(priority: .userInitiated) {
+                    try store.page(before: cursor, limit: limit, search: query)
+                }.value
+                try Task.checkCancellation()
+                guard let self, generation == self.reloadGeneration else { return }
+                self.entries.append(contentsOf: page.entries)
+                self.hasMore = page.hasMore; self.loadingMore = false
+            } catch is CancellationError {
+            } catch {
+                guard let self, generation == self.reloadGeneration else { return }
+                self.loadingMore = false; self.fail(error)
+            }
+        }
     }
     func fail(_ error: Error) { message = error.localizedDescription; isError = true }
     var editDue: String? { editHasDue ? Self.dateKey(editDate) : nil }
-    var editDirty: Bool { editing.map { editDraft != $0.text || editDue != $0.due } ?? false }
+    var editDirty: Bool { editing.map { editDraft != $0.text || editDue != $0.due || ($0.kind == "todo" && (editStatus != $0.status || editImportant != ($0.priority == "important"))) } ?? false }
     @discardableResult
     func leaveUnchangedEditor() -> Bool {
-        guard !editDirty else {
+        guard !editDirty && !(taskCreating && taskDraftDirty) else {
             editError = "请先保存或取消当前编辑。"
             message = editError; isError = true
             return false
         }
-        editing = nil
+        editing = nil; taskCreating = false
         return true
     }
     func showComposer(at point: CGPoint = CGPoint(x: 24, y: 40)) {
+        if mode.isTaskView { showNewTask(); return }
         guard leaveUnchangedEditor() else { return }
         readingRequested = true
         composerPosition = point
@@ -140,13 +342,23 @@ final class AppModel: ObservableObject {
         }
         guard leaveUnchangedEditor() else { return }
         composerPosition = nil
+        editStatus = entry.status ?? "pending"; editImportant = entry.priority == "important"
         editing = entry; editDraft = entry.text; editError = ""; editHasDue = entry.due != nil
-        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM-dd"
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.calendar = Calendar(identifier: .gregorian); f.dateFormat = "yyyy-MM-dd"
         editDate = entry.due.flatMap { f.date(from: $0) } ?? Date()
     }
     func saveEditing() {
         guard let editing, !editDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        update(editing, text: editDraft, due: editDue)
+        if editing.kind == "todo" {
+            do {
+                guard let store else { throw NotoError("无法打开本地数据。") }
+                let changed = try store.updateTodo(id: editing.id, text: editDraft, due: editDue, clearDue: editDue == nil,
+                                                   status: editStatus, priority: editImportant ? "important" : "normal", expected: editing)
+                remember(before: [editing], after: [changed], message: "已更新任务。")
+                if conversation?.id == changed.id { conversation = changed }
+                self.editing = nil
+            } catch { editError = error.localizedDescription }
+        } else { update(editing, text: editDraft, due: editDue) }
     }
     func cancelEditing() { editing = nil; editError = "" }
     func setSearch(_ value: String) {
@@ -156,15 +368,16 @@ final class AppModel: ObservableObject {
     func submitFocusedInput() {
         guard !settings else { return }
         if let input = NSApp.keyWindow?.firstResponder as? InputTextView { input.submit() }
+        else if taskCreating { saveNewTask() }
         else if editing != nil { saveEditing() }
-        else if composerPosition != nil { ask() }
+        else if composerPosition != nil { save() }
     }
     func remember(before: [Entry], after: [Entry], message: String) {
         undoBefore = before; undoAfter = after; undoAvailable = !after.isEmpty
-        self.message = message; isError = false; reload()
+        self.message = message; isError = false; convertedTaskID = nil; reload()
     }
     func save(todo: Bool = false) {
-        guard !busy, let store else { return }
+        guard let store else { return }
         var content = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
         let isTodo = todo || content.hasPrefix("/todo ") || content.hasPrefix("待办：")
@@ -179,7 +392,7 @@ final class AppModel: ObservableObject {
     func toggle(_ entry: Entry) {
         guard let store else { return }
         do {
-            let changed = try store.setCompleted(id: entry.id, completed: !entry.completed)
+            let changed = try store.setCompleted(id: entry.id, completed: !entry.completed, expected: entry)
             remember(before: [entry], after: [changed], message: changed.completed ? "完成了一件事。" : "已重新打开。")
         } catch { fail(error) }
     }
@@ -194,7 +407,7 @@ final class AppModel: ObservableObject {
     }
     func undo() {
         guard undoAvailable else { return }
-        do { try store?.undo(before: undoBefore, after: undoAfter); undoAvailable = false; message = "已撤销。"; isError = false; reload() }
+        do { try store?.undo(before: undoBefore, after: undoAfter); undoAvailable = false; convertedTaskID = nil; message = "已撤销。"; isError = false; reload() }
         catch { fail(error) }
     }
     func ask() {
@@ -275,9 +488,11 @@ struct NotoApp: App {
     var body: some Scene {
         Window("noto", id: "main") {
             ContentView(model: model)
+                .buttonStyle(QuietButtonStyle())
                 .frame(minWidth: 620, minHeight: 480)
                 .onAppear {
-                    if model.preview && CommandLine.arguments.contains("--dark") { NSApp.appearance = NSAppearance(named: .darkAqua) }
+                    let isolated = model.preview || ProcessInfo.processInfo.environment["NOTO_DATABASE"] != nil
+                    if isolated && CommandLine.arguments.contains("--dark") { NSApp.appearance = NSAppearance(named: .darkAqua) }
                     NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)
                     DispatchQueue.main.async {
                         if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "main" }) ?? NSApp.keyWindow {
@@ -285,9 +500,9 @@ struct NotoApp: App {
                             window.titlebarAppearsTransparent = true
                             window.titlebarSeparatorStyle = .none
                             window.styleMask.insert(.fullSizeContentView)
-                            window.isMovableByWindowBackground = true
+                            window.isMovableByWindowBackground = model.mode == .notes
                             window.backgroundColor = NSColor.textBackgroundColor
-                            if model.preview { window.setContentSize(NSSize(width: 1340, height: 954)); window.center() }
+                            if isolated { window.setContentSize(CommandLine.arguments.contains("--compact") ? NSSize(width: 620, height: 700) : NSSize(width: 1340, height: 954)); window.center() }
                         }
                     }
                 }
@@ -305,6 +520,12 @@ struct NotoApp: App {
                 Button("撤销文本编辑") { NSApp.sendAction(Selector(("undo:")), to: nil, from: nil) }.keyboardShortcut("z")
                 Button("重做文本编辑") { NSApp.sendAction(Selector(("redo:")), to: nil, from: nil) }.keyboardShortcut("z", modifiers: [.command, .option])
                 Button("撤销上次记录操作") { model.undo() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!model.undoAvailable)
+                Button("恢复上次删除的任务") { model.restoreLastDeletedTask() }.disabled(model.lastDeletedTaskID == nil)
+            }
+            CommandGroup(after: .toolbar) {
+                ForEach(ContentMode.allCases) { mode in
+                    Button("显示\(mode.label)") { model.switchMode(mode) }.keyboardShortcut(mode.shortcut, modifiers: .command)
+                }
             }
             CommandGroup(after: .textEditing) {
                 Button("搜索记录") {
@@ -329,7 +550,7 @@ extension Notification.Name {
 }
 
 // Shared native tokens. Semantic colors follow macOS appearance and contrast.
-private enum NotoDesign {
+enum NotoDesign {
     static let canvas = Color(nsColor: .textBackgroundColor)
     static let field = Color(nsColor: .controlBackgroundColor)
     static let line = Color(nsColor: .separatorColor).opacity(0.6)
@@ -338,16 +559,49 @@ private enum NotoDesign {
     static let radius: CGFloat = 12
 }
 
-private struct QuietButtonStyle: ButtonStyle {
+// Shared chrome for actions; native menus retain their keyboard behavior.
+struct QuietButtonStyle: ButtonStyle {
+    var prominent = false
+    var icon = false
     @Environment(\.isEnabled) private var enabled
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .padding(.horizontal, 6).padding(.vertical, 5)
-            .background(configuration.isPressed ? Color.primary.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .font(.system(size: 13, weight: .regular))
+            .padding(.horizontal, icon ? 0 : 10)
+            .frame(minWidth: 28, minHeight: 28)
+            .foregroundStyle(prominent ? Color.white : Color.primary)
+            .background(prominent ? Color.accentColor.opacity(configuration.isPressed ? 0.75 : 1) : .clear, in: RoundedRectangle(cornerRadius: 6))
+            .modifier(ActionSurface(pressed: configuration.isPressed))
             .opacity(enabled ? 1 : 0.4)
-            .scaleEffect(configuration.isPressed && !reduceMotion && NSApp.currentEvent?.type == .leftMouseDown ? 0.97 : 1)
-            .contentShape(Rectangle())
+    }
+}
+
+private struct ActionSurface: ViewModifier {
+    var pressed = false
+    @Environment(\.isEnabled) private var enabled
+    @State private var hovering = false
+    func body(content: Content) -> some View {
+        content
+            .background(enabled ? Color.primary.opacity(pressed ? 0.10 : (hovering ? 0.055 : 0)) : .clear,
+                        in: RoundedRectangle(cornerRadius: 6))
+            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .onHover { hovering = $0 }
+    }
+}
+
+extension View {
+    func actionMenuStyle() -> some View {
+        self.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .modifier(ActionSurface())
+    }
+}
+
+struct ActionIcon: View {
+    let name: String
+    init(_ name: String) { self.name = name }
+    var body: some View {
+        Image(systemName: name).font(.system(size: 13, weight: .regular))
+            .frame(width: 28, height: 28)
     }
 }
 
@@ -363,6 +617,11 @@ struct ContentView: View {
             HStack(spacing: 0) {
                 if !showChatOnly {
                     VStack(spacing: 0) {
+                    if model.mode == .calendar {
+                        TaskCalendar(model: model).padding(.top, 48)
+                    } else if model.mode == .board {
+                        TaskBoard(model: model).padding(.top, 48)
+                    } else {
                     ScrollViewReader { proxy in
                         HStack(spacing: 0) {
                             if !model.entries.isEmpty {
@@ -383,25 +642,34 @@ struct ContentView: View {
                                 .padding(.top, 48)
                         }
                     }
+                    }
                     if !model.message.isEmpty { feedback.padding(.horizontal, 24).padding(.bottom, 16) }
                     }
                     .overlay(alignment: .top) {
                         HStack {
+                            if model.mode == .notes {
                             Button {
                                 withAnimation(reduceMotion ? nil : .timingCurve(0.23, 1, 0.32, 1, duration: 0.18)) { datesExpanded.toggle() }
-                            } label: { Image(systemName: "sidebar.left").font(.system(size: 15)).frame(width: 20, height: 20) }
-                                .buttonStyle(QuietButtonStyle()).foregroundStyle(.secondary).disabled(model.entries.isEmpty)
+                            } label: { ActionIcon("sidebar.left") }
+                                .buttonStyle(QuietButtonStyle(icon: true)).foregroundStyle(.secondary).disabled(model.entries.isEmpty)
                                 .help(datesExpanded ? "收起日期侧栏" : "展开日期侧栏")
                                 .accessibilityLabel(datesExpanded ? "收起日期侧栏" : "展开日期侧栏")
+                            }
+                            ViewModeMenu(model: model)
+                            if model.mode == .notes {
+                                Button { model.showComposer() } label: { ActionIcon("square.and.pencil") }
+                                    .buttonStyle(QuietButtonStyle(icon: true)).help("写笔记（⌘N）").accessibilityLabel("写笔记")
+                            }
                             if narrow && model.conversation != nil {
                                 Button {
                                     guard model.leaveUnchangedEditor() else { return }
                                     model.composerPosition = nil; model.readingRequested = false
-                                } label: { Image(systemName: "bubble.left.and.bubble.right").frame(width: 20, height: 20) }
-                                    .buttonStyle(QuietButtonStyle()).help("返回当前对话").accessibilityLabel("返回当前对话")
+                                } label: { ActionIcon("bubble.left") }
+                                    .buttonStyle(QuietButtonStyle(icon: true)).help("返回当前对话").accessibilityLabel("返回当前对话")
                             }
                             Spacer()
-                            SearchInput(text: Binding(get: { model.search }, set: { model.setSearch($0) })).frame(width: 190, height: 28)
+                            if model.reloading { ProgressView().controlSize(.small).help("正在读取记录") }
+                            SearchInput(text: Binding(get: { model.search }, set: { model.setSearch($0) }), placeholder: model.mode.isTaskView ? "搜索任务与对话" : "搜索笔记与对话").frame(width: 190, height: 28)
                         }.padding(.leading, 86).padding(.trailing, 20).padding(.top, 10)
                     }
                 }
@@ -412,26 +680,37 @@ struct ContentView: View {
                 }
             }
         }
+        .onChange(of: model.mode) { _, mode in
+            NSApp.windows.first(where: { $0.identifier?.rawValue == "main" })?.isMovableByWindowBackground = mode == .notes
+        }
+        .disabled(model.opening)
+        .overlay { if model.opening { ProgressView("正在打开记录…").padding(20).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10)) } }
         .background(NotoDesign.canvas).foregroundStyle(.primary)
         .ignoresSafeArea(.container, edges: .top)
         .onExitCommand {
-            if model.editing != nil { model.cancelEditing() }
+            if model.taskCreating { model.taskCreating = false }
+            else if model.editing != nil { model.cancelEditing() }
             else if model.composerPosition != nil { model.composerPosition = nil }
             else if !model.search.isEmpty { model.setSearch("") }
             else { model.closeConversation() }
         }
+        .sheet(isPresented: Binding(get: { model.taskCreating || (model.mode.isTaskView && model.editing != nil) }, set: { value in
+            if !value { _ = model.leaveUnchangedEditor() }
+        })) { TaskEditor(model: model) }
         .sheet(isPresented: $model.settings) { SettingsView(model: model) }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refreshIfChanged() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in model.cancel() }
     }
     private var feedback: some View {
         HStack(spacing: 10) {
-            Image(systemName: model.isError ? "exclamationmark.circle" : "checkmark.circle")
-                .foregroundStyle(model.isError ? Color.red : Color.secondary)
+            if model.isError { Image(systemName: "exclamationmark.circle").foregroundStyle(.red) }
             Text(model.message).font(NotoDesign.caption).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
+            if model.convertedTaskID != nil { Button("在看板查看") { model.showConvertedTask() }.buttonStyle(QuietButtonStyle()) }
             if model.undoAvailable { Button("撤销") { model.undo() }.buttonStyle(QuietButtonStyle()).help("撤销上次记录操作（⌘⇧Z）") }
-            Button { model.message = "" } label: { Image(systemName: "xmark").frame(width: 18, height: 18) }
-                .buttonStyle(QuietButtonStyle()).accessibilityLabel("关闭操作提示")
+            if model.lastDeletedTaskID != nil { Button("恢复删除") { model.restoreLastDeletedTask() }.buttonStyle(QuietButtonStyle()) }
+            Button { model.message = "" } label: { ActionIcon("xmark") }
+                .buttonStyle(QuietButtonStyle(icon: true)).accessibilityLabel("关闭操作提示")
         }.font(NotoDesign.caption).padding(10)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(NotoDesign.line, lineWidth: 0.5)).frame(maxWidth: 620)
@@ -455,10 +734,8 @@ private struct ReadingPane: View {
                     VStack(alignment: .leading, spacing: 0) {
                         if model.entries.isEmpty && model.editing == nil {
                             VStack(alignment: .leading, spacing: 12) {
-                                Image(systemName: model.search.isEmpty ? "square.and.pencil" : "magnifyingglass")
-                                    .font(.system(size: 22, weight: .light)).foregroundStyle(.secondary)
                                 Text(model.search.isEmpty ? "留下一点今天。" : "没有找到相关记录").font(.system(size: 17, weight: .medium))
-                                Text(model.search.isEmpty ? "双击空白处开始，或按 ⌘N。\n⌘ 回车发送给 AI，也可以记为小记或待办。" : "试试更短的关键词，也可以搜索对话里的内容。")
+                                Text(model.search.isEmpty ? "点击编写，或按 ⌘N。" : "试试其他关键词。")
                                     .font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(5)
                                 if !model.search.isEmpty {
                                     Button("清空搜索") { model.setSearch("") }.buttonStyle(QuietButtonStyle()).font(NotoDesign.caption)
@@ -479,7 +756,7 @@ private struct ReadingPane: View {
                                             Text(group.label).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
                                             Rectangle().fill(NotoDesign.line).frame(height: 0.5)
                                         }.excludeFromBlankInput()
-                                        VStack(spacing: 4) {
+                                        LazyVStack(spacing: 4) {
                                             ForEach(group.entries) { entry in EntryRow(entry: entry, model: model).excludeFromBlankInput() }
                                         }
                                     }.id("content-" + group.id)
@@ -488,7 +765,7 @@ private struct ReadingPane: View {
                                         })
                                 }
                                 if model.hasMore {
-                                    Button("加载更早的记录") { model.loadMore() }
+                                    Button("加载更多") { model.loadMore() }
                                         .buttonStyle(QuietButtonStyle()).font(NotoDesign.caption).foregroundStyle(.secondary)
                                         .frame(maxWidth: .infinity).padding(.vertical, 12).excludeFromBlankInput()
                                         .onAppear { model.loadMore() }
@@ -526,21 +803,18 @@ private struct NewContentInput: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("写点什么").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
                 Spacer()
-                Button { model.composerPosition = nil } label: { Image(systemName: "xmark").frame(width: 18, height: 18) }
-                    .buttonStyle(QuietButtonStyle()).accessibilityLabel("收起录入，保留草稿")
+                Button { model.composerPosition = nil } label: { ActionIcon("xmark") }
+                    .buttonStyle(QuietButtonStyle(icon: true)).accessibilityLabel("收起录入，保留草稿")
             }
-            Composer(text: $model.draft, enabled: true, purpose: .newContent, onSubmit: { model.ask() }, onCancel: { model.composerPosition = nil })
+            Composer(text: $model.draft, enabled: true, purpose: .newContent, onSubmit: { model.save() }, onCancel: { model.composerPosition = nil })
                 .frame(minHeight: 48)
-            if model.busy { Text("AI 正在回复，可以先写下下一条。完成后即可发送。").font(NotoDesign.caption).foregroundStyle(.secondary) }
+            if model.busy { Text("AI 正在回复，你可以继续保存笔记。").font(NotoDesign.caption).foregroundStyle(.secondary) }
             HStack(spacing: 6) {
-                Button("记为小记") { model.save() }
-                Button("添加待办") { model.save(todo: true) }
+                Button("询问 AI") { model.ask() }.disabled(model.busy)
                 Spacer(minLength: 0)
-                Button("发送给 AI  ⌘↵") { model.ask() }.buttonStyle(.borderedProminent)
-            }.font(NotoDesign.caption).buttonStyle(QuietButtonStyle()).disabled(empty || model.busy)
-            Text("回车换行 · Esc 收起并保留草稿").font(.system(size: 11)).foregroundStyle(.secondary)
+                Button("保存") { model.save() }.buttonStyle(QuietButtonStyle(prominent: true)).help("保存笔记（⌘↵）；回车换行")
+            }.font(NotoDesign.caption).buttonStyle(QuietButtonStyle()).disabled(empty)
         }.padding(16)
             .background(NotoDesign.field, in: RoundedRectangle(cornerRadius: NotoDesign.radius))
             .overlay(RoundedRectangle(cornerRadius: NotoDesign.radius).stroke(NotoDesign.line, lineWidth: 0.5))
@@ -599,23 +873,13 @@ private struct BlankClickObserver: NSViewRepresentable {
 struct ConversationView: View {
     @ObservedObject var model: AppModel
     private var pending: Bool { model.messages.last?.role == "user" }
-    private var status: String {
-        if model.busy { return "正在回复" }
-        if !model.chatError.isEmpty { return "回复未完成" }
-        if pending { return "等待重试" }
-        if !model.chatDraft.isEmpty { return "草稿未发送" }
-        return "对话已保存"
-    }
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("对话").font(.system(size: 17, weight: .semibold))
-                    Text(status).font(NotoDesign.caption).foregroundStyle(.secondary)
-                }
+                Text("对话").font(.system(size: 17, weight: .semibold))
                 Spacer()
-                Button { model.closeConversation() } label: { Image(systemName: "xmark").frame(width: 18, height: 18) }
-                    .buttonStyle(QuietButtonStyle()).help(model.busy ? "停止回复后可关闭" : "关闭对话（Esc）").accessibilityLabel("关闭对话").disabled(model.busy)
+                Button { model.closeConversation() } label: { ActionIcon("xmark") }
+                    .buttonStyle(QuietButtonStyle(icon: true)).help(model.busy ? "停止回复后可关闭" : "关闭对话（Esc）").accessibilityLabel("关闭对话").disabled(model.busy)
             }.padding(.horizontal, 24).padding(.top, 54).padding(.bottom, 20)
             Divider().padding(.horizontal, 24)
             ScrollViewReader { proxy in
@@ -625,10 +889,10 @@ struct ConversationView: View {
                             VStack(alignment: .leading, spacing: 10) {
                                 HStack {
                                     Text(message.role == "user" ? "你" : "AI").font(.system(size: 12, weight: .medium))
+                                        .help(message.createdAt.formatted(date: .abbreviated, time: .shortened))
                                     Spacer()
-                                    Text(message.createdAt, style: .time).font(.system(size: 11)).monospacedDigit()
                                 }.foregroundStyle(.secondary)
-                                Text((try? AttributedString(markdown: message.text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(message.text))
+                                MessageText(text: message.text)
                                     .font(NotoDesign.body).lineSpacing(4).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                                 if let execution = message.execution {
                                     DisclosureGroup {
@@ -641,13 +905,11 @@ struct ConversationView: View {
                             }.frame(maxWidth: .infinity, alignment: .leading)
                         }
                         if model.busy {
-                            HStack(spacing: 10) { ProgressView().controlSize(.small); Text("正在整理，完成后显示回复…").font(NotoDesign.caption).foregroundStyle(.secondary) }
+                            HStack(spacing: 10) { ProgressView().controlSize(.small); Text("正在回复…").font(NotoDesign.caption).foregroundStyle(.secondary) }
                         }
                         if !model.chatError.isEmpty {
                             VStack(alignment: .leading, spacing: 8) {
-                                Label("这次回复没有完成", systemImage: "exclamationmark.circle").font(.system(size: 13, weight: .medium))
-                                Text(model.chatError).font(NotoDesign.caption).textSelection(.enabled)
-                                Text("问题已保存，可以重试。").font(NotoDesign.caption).foregroundStyle(.secondary)
+                                Label(model.chatError, systemImage: "exclamationmark.circle").font(NotoDesign.caption).textSelection(.enabled)
                             }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
                                 .background(Color.red.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
                         }
@@ -664,9 +926,9 @@ struct ConversationView: View {
             VStack(alignment: .leading, spacing: 10) {
                 if pending && !model.busy {
                     HStack {
-                        Text("上一条问题还没有回复").font(NotoDesign.caption).foregroundStyle(.secondary)
+                        Text("问题已保存").font(NotoDesign.caption).foregroundStyle(.secondary)
                         Spacer()
-                        Button("重试") { model.requestReply() }.buttonStyle(.bordered)
+                        Button("重试") { model.requestReply() }.buttonStyle(QuietButtonStyle())
                     }
                 }
                 Composer(text: $model.chatDraft, enabled: true, purpose: .chat, onSubmit: { model.sendChat() }, onCancel: { model.closeConversation() })
@@ -674,18 +936,33 @@ struct ConversationView: View {
                     .padding(14).background(NotoDesign.field, in: RoundedRectangle(cornerRadius: NotoDesign.radius))
                     .overlay(RoundedRectangle(cornerRadius: NotoDesign.radius).stroke(NotoDesign.line, lineWidth: 0.5))
                 HStack {
-                    Text("⌘↵ 发送 · 回车换行").font(.system(size: 11)).foregroundStyle(.secondary)
                     Spacer()
                     if model.busy {
-                        Button { model.cancel() } label: { Label("停止", systemImage: "stop.fill") }.buttonStyle(QuietButtonStyle())
+                        Button { model.cancel() } label: { ActionIcon("stop.fill") }
+                            .buttonStyle(QuietButtonStyle(icon: true)).help("停止回复").accessibilityLabel("停止回复")
                     } else {
-                        Button { model.sendChat() } label: { Image(systemName: "arrow.up.circle.fill").font(.system(size: 22)).frame(width: 24, height: 24) }
-                            .buttonStyle(QuietButtonStyle()).foregroundStyle(Color.accentColor).help("发送消息（⌘ 回车）").accessibilityLabel("发送消息")
+                        Button { model.sendChat() } label: { ActionIcon("arrow.up") }
+                            .buttonStyle(QuietButtonStyle(icon: true)).foregroundStyle(Color.accentColor).help("发送消息（⌘ 回车）").accessibilityLabel("发送消息")
                             .disabled(pending || model.chatDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }.font(NotoDesign.caption)
             }.padding(.horizontal, 24).padding(.bottom, 20).padding(.top, 12)
         }.background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+private struct MessageText: View {
+    let text: String
+    @State private var rendered = AttributedString()
+    var body: some View {
+        Text(rendered)
+            .task(id: text) {
+                let value = text
+                let parsed = await Task.detached(priority: .userInitiated) {
+                    (try? AttributedString(markdown: value, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(value)
+                }.value
+                if !Task.isCancelled { rendered = parsed }
+            }
     }
 }
 
@@ -705,7 +982,6 @@ struct DateRail: View {
     var body: some View {
         let selectedID = model.groups.contains(where: { $0.id == activeDay }) ? activeDay : model.groups.first?.id
         VStack(alignment: .leading, spacing: 16) {
-            if expanded { Text("日期").font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 20) }
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: expanded ? 6 : 2) {
@@ -713,7 +989,6 @@ struct DateRail: View {
                             let selected = selectedID == group.id
                             Button { navigate(group.id) } label: {
                                 HStack(spacing: 8) {
-                                    Image(systemName: "minus").font(.system(size: selected ? 13 : 9, weight: selected ? .semibold : .regular)).frame(width: 16)
                                     Text(expanded ? "\(group.shortLabel)  \(group.label == "今天" || group.label == "昨天" ? group.label : "")" : group.shortLabel)
                                         .font(.system(size: expanded ? 13 : 11, weight: selected ? .medium : .regular)).monospacedDigit()
                                     if expanded { Spacer(minLength: 0) }
@@ -777,27 +1052,46 @@ struct EntryRow: View {
                     if entry.due != nil {
                         Text(dueLabel).font(.system(size: 11)).foregroundStyle(overdue ? Color.orange : Color.secondary)
                     }
+                    if entry.kind == "todo" {
+                        if entry.status == "in_progress" { Text("进行中").font(NotoDesign.caption).foregroundStyle(.secondary) }
+                        if entry.priority == "important" {
+                            Button { model.changeTask(entry, priority: "normal") } label: {
+                                ActionIcon("star.fill")
+                            }.buttonStyle(QuietButtonStyle(icon: true)).help("取消重要")
+                                .accessibilityLabel("取消重要")
+                        }
+                    }
                     Spacer(minLength: 0)
                     if entry.hasConversation {
-                        Button { model.openConversation(entry) } label: { Label("对话", systemImage: "bubble.left.and.bubble.right").font(.system(size: 11)) }
-                            .buttonStyle(QuietButtonStyle()).foregroundStyle(model.conversation?.id == entry.id ? Color.accentColor : Color.secondary)
+                        Button { model.openConversation(entry) } label: { ActionIcon("bubble.left") }
+                            .buttonStyle(QuietButtonStyle(icon: true)).foregroundStyle(model.conversation?.id == entry.id ? Color.accentColor : Color.secondary)
                             .help("打开对话").accessibilityLabel("打开对话").disabled(model.busy)
                     }
-                    Button(action: edit) { Image(systemName: "pencil").font(.system(size: 12)).frame(width: 16, height: 18) }
-                        .buttonStyle(QuietButtonStyle()).foregroundStyle(.secondary).help("编辑记录").accessibilityLabel("编辑记录")
+                    Menu { actions } label: { ActionIcon("ellipsis") }
+                        .actionMenuStyle()
+                        .help("记录操作").accessibilityLabel("记录操作")
                 }
             }
         }
         .padding(12)
         .background(model.conversation?.id == entry.id ? Color.accentColor.opacity(0.055) : .clear, in: RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
-        .contextMenu {
+        .contextMenu { actions }
+        }
+        }
+    }
+    @ViewBuilder private var actions: some View {
             Button("编辑", action: edit)
+            if entry.kind == "note" { Button("转为任务") { model.convertToTask(entry) } }
+            if entry.kind == "todo" {
+                ForEach(TodoStatus.allCases, id: \.self) { status in
+                    Button(status.label) { model.changeTask(entry, status: status.rawValue) }
+                }
+                Button(entry.priority == "important" ? "取消重要" : "标记重要") { model.changeTask(entry, priority: entry.priority == "important" ? "normal" : "important") }
+                Button("删除任务", role: .destructive) { model.deleteTask(entry) }.disabled(model.busy)
+            }
             Button("复制") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(entry.text, forType: .string) }
             if entry.hasConversation { Button("打开对话") { model.openConversation(entry) }.disabled(model.busy) }
-        }
-        }
-        }
     }
 }
 
@@ -860,6 +1154,7 @@ struct Composer: NSViewRepresentable {
     let purpose: InputPurpose
     let onSubmit: () -> Void
     let onCancel: () -> Void
+    var placeholder: String? = nil
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSScrollView()
@@ -879,10 +1174,11 @@ struct Composer: NSViewRepresentable {
         view.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         view.textContainer?.widthTracksTextView = true
         switch purpose {
-        case .newContent: view.placeholder = "写下想法，⌘ 回车发送给 AI。"
+        case .newContent: view.placeholder = "写下想法，⌘ 回车保存。"
         case .chat: view.placeholder = "继续聊…"
         case .edit: view.placeholder = "记录内容不能为空。"
         }
+        if let placeholder { view.placeholder = placeholder }
         view.setAccessibilityLabel(purpose.label)
         context.coordinator.view = view
         context.coordinator.observer = NotificationCenter.default.addObserver(forName: purpose.focusNotification, object: nil, queue: .main) { [weak view] _ in view?.window?.makeFirstResponder(view) }
@@ -903,7 +1199,7 @@ struct Composer: NSViewRepresentable {
             view.scrollRangeToVisible(NSRange(location: 0, length: 0))
         }
         view.onSubmit = onSubmit; view.onCancel = onCancel
-        view.isEditable = enabled; view.needsDisplay = true
+        if view.isEditable != enabled { view.isEditable = enabled }
     }
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
         let width = proposal.width ?? 600
@@ -929,18 +1225,19 @@ struct Composer: NSViewRepresentable {
 
 struct SearchInput: NSViewRepresentable {
     @Binding var text: String
+    var placeholder = "搜索笔记与对话"
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSSearchField {
         let view = NSSearchField()
         view.sendsSearchStringImmediately = true
         view.sendsWholeSearchString = false
         view.controlSize = .regular
-        view.placeholderString = "搜索笔记与对话"; view.font = .systemFont(ofSize: 13)
+        view.placeholderString = placeholder; view.font = .systemFont(ofSize: 13)
         view.delegate = context.coordinator; view.setAccessibilityLabel("搜索")
         context.coordinator.observer = NotificationCenter.default.addObserver(forName: .focusSearch, object: nil, queue: .main) { [weak view] _ in view?.window?.makeFirstResponder(view) }
         return view
     }
-    func updateNSView(_ view: NSSearchField, context: Context) { context.coordinator.parent = self; if view.stringValue != text { view.stringValue = text } }
+    func updateNSView(_ view: NSSearchField, context: Context) { view.placeholderString = placeholder; context.coordinator.parent = self; if view.stringValue != text { view.stringValue = text } }
     class Coordinator: NSObject, NSSearchFieldDelegate {
         var parent: SearchInput
         var observer: NSObjectProtocol?
@@ -981,22 +1278,23 @@ struct InlineEditView: View {
                 .frame(minHeight: 64)
             if entry.kind == "todo" {
                 HStack {
-                    Toggle("截止日期", isOn: $model.editHasDue).toggleStyle(.checkbox)
-                    Spacer()
-                    if model.editHasDue { DatePicker("截止日期", selection: $model.editDate, displayedComponents: .date).labelsHidden().accessibilityLabel("截止日期") }
+                    Picker("状态", selection: $model.editStatus) {
+                        ForEach(TodoStatus.allCases, id: \.self) { Text($0.label).tag($0.rawValue) }
+                    }
+                    Button { model.editImportant.toggle() } label: {
+                        ActionIcon(model.editImportant ? "star.fill" : "star")
+                    }.buttonStyle(QuietButtonStyle(icon: true)).help("切换重要标记").accessibilityLabel("重要任务")
+                        .accessibilityValue(model.editImportant ? "已开启" : "已关闭")
                 }.font(NotoDesign.caption)
-            }
-            if entry.hasConversation {
-                Text("仅修改列表中的文字，原始问答历史保持不变。").font(NotoDesign.caption).foregroundStyle(.secondary)
+                TaskDateControl(hasDue: $model.editHasDue, date: $model.editDate)
             }
             if !model.editError.isEmpty {
                 Label(model.editError, systemImage: "exclamationmark.circle").font(NotoDesign.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
-                Text("回车换行 · ⌘↵ 保存").font(.system(size: 11)).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
                 Button("取消") { model.cancelEditing() }.buttonStyle(QuietButtonStyle())
-                Button("保存") { model.saveEditing() }.buttonStyle(.borderedProminent)
+                Button("保存") { model.saveEditing() }.buttonStyle(QuietButtonStyle(prominent: true)).help("保存（⌘↵）；回车换行")
                     .disabled(model.editDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }.font(NotoDesign.caption)
         }.padding(16)
@@ -1008,17 +1306,23 @@ struct InlineEditView: View {
 struct SettingsView: View {
     @ObservedObject var model: AppModel
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 24) {
             Text("设置").font(.system(size: 17, weight: .semibold))
             VStack(alignment: .leading, spacing: 12) {
                 Picker("AI CLI", selection: $model.provider) {
                     ForEach(Provider.allCases) { provider in Text(provider.title).tag(provider) }
                 }
-                Text("使用本机已安装并登录的 AI CLI。\n更改后，将在下一轮对话中使用。").font(NotoDesign.caption).foregroundStyle(.secondary).lineSpacing(4)
+                Text("使用本机已登录的 CLI，下次对话生效。").font(NotoDesign.caption).foregroundStyle(.secondary).lineSpacing(4)
             }
             Divider()
-            HStack { Spacer(); Button("完成") { model.settings = false }.keyboardShortcut(.defaultAction) }
-        }.padding(28).frame(width: 340)
-            .onExitCommand { model.settings = false }
+            if let sync = model.sync { SyncSettingsView(model: model, controller: sync) }
+            else { Text("预览模式不连接同步服务。").foregroundStyle(.secondary) }
+            Divider()
+            HStack { Spacer(); Button("完成") { model.settings = false }.keyboardShortcut(.defaultAction).disabled(model.sync?.isSyncing == true) }
+        }.padding(28)
+        }.buttonStyle(QuietButtonStyle()).frame(width: 540, height: 660)
+            .interactiveDismissDisabled(model.sync?.isSyncing == true)
+            .onExitCommand { if model.sync?.isSyncing != true { model.settings = false } }
     }
 }

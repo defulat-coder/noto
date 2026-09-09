@@ -1,0 +1,7 @@
+# Authentication comes from the verified Supabase JWT subject, never client parameters.
+bucket_definitions:
+  user_tasks:
+    parameters: SELECT request.user_id() AS user_id
+    data:
+      - SELECT id, user_id, document, revision, deleted, updated_at FROM noto_tasks WHERE user_id = bucket.user_id
+      - SELECT id, user_id, task_id, document, created_at FROM noto_conflicts WHERE user_id = bucket.user_id

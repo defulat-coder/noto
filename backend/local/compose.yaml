@@ -1,0 +1,17 @@
+# Local development only. Supabase must already be running on the noto-local network.
+name: noto-sync
+services:
+  powersync:
+    image: journeyapps/powersync-service@sha256:39f6a534f757afd1c633e91a19b23fde03186d16b5543b4af0f5c8f09d4cb79d
+    command: [start, -r, unified]
+    environment:
+      POWERSYNC_CONFIG_PATH: /config/service.yaml
+    volumes:
+      - ./service.yaml:/config/service.yaml:ro
+      - ../powersync/sync-rules.yaml:/config/sync-rules.yaml:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks: [noto-local]
+networks:
+  noto-local:
+    external: true

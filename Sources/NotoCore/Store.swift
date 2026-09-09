@@ -1,6 +1,17 @@
 import Foundation
 import GRDB
 
+public enum TodoStatus: String, Codable, CaseIterable, Sendable {
+    case pending, inProgress = "in_progress", completed
+    public var label: String {
+        switch self { case .pending: "待开始"; case .inProgress: "进行中"; case .completed: "已完成" }
+    }
+}
+
+public enum TodoPriority: String, Codable, CaseIterable, Sendable {
+    case normal, important
+}
+
 public struct Entry: Codable, FetchableRecord, PersistableRecord, Identifiable, Equatable, Sendable {
     public static let databaseTableName = "entries"
     public var id: String
@@ -8,13 +19,20 @@ public struct Entry: Codable, FetchableRecord, PersistableRecord, Identifiable, 
     public var text: String
     public var due: String?
     public var completed: Bool
+    public var status: String?
+    public var priority: String?
+    public var completedAt: Date?
     public var createdAt: Date
     public var updatedAt: Date
     public var hasConversation: Bool = false
 
-    public init(id: String = UUID().uuidString.lowercased(), kind: String, text: String, due: String? = nil, completed: Bool = false, createdAt: Date = Date()) {
+    public init(id: String = UUID().uuidString.lowercased(), kind: String, text: String, due: String? = nil, completed: Bool = false, createdAt: Date = Date(), status: String? = nil, priority: String? = nil) {
         self.id = id; self.kind = kind; self.text = text; self.due = due
-        self.completed = completed; self.createdAt = createdAt; self.updatedAt = createdAt
+        self.status = kind == "todo" ? (status ?? (completed ? "completed" : "pending")) : status
+        self.priority = kind == "todo" ? (priority ?? "normal") : priority
+        self.completed = self.status == "completed"
+        self.completedAt = self.completed ? createdAt : nil
+        self.createdAt = createdAt; self.updatedAt = createdAt
     }
 }
 
@@ -35,20 +53,24 @@ public struct NotoError: LocalizedError {
 }
 
 public final class Store: @unchecked Sendable {
-    private let db: DatabaseQueue
+    let db: any DatabaseWriter
     public static var defaultURL: URL {
         if let path = ProcessInfo.processInfo.environment["NOTO_DATABASE"] { return URL(fileURLWithPath: path) }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Noto/notes.sqlite")
+        let pointer = localURL.deletingLastPathComponent().appendingPathComponent("active-account.json")
+        if let data = try? Data(contentsOf: pointer), let path = try? JSONDecoder().decode(String.self, from: data) {
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            let root = localURL.deletingLastPathComponent().appendingPathComponent("accounts").standardizedFileURL.path + "/"
+            if url.path.hasPrefix(root), FileManager.default.fileExists(atPath: url.path) { return url }
+        }
+        return localURL
     }
 
-    public init(url: URL? = Store.defaultURL) throws {
+    public init(url: URL? = Store.defaultURL, busyTimeout: TimeInterval = 5) throws {
         if let url {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             var config = Configuration()
-            config.busyMode = .timeout(5)
-            db = try DatabaseQueue(path: url.path, configuration: config)
-            try db.writeWithoutTransaction { try $0.execute(sql: "PRAGMA journal_mode=WAL") }
+            config.busyMode = .timeout(busyTimeout)
+            db = try DatabasePool(path: url.path, configuration: config)
         } else { db = try DatabaseQueue() }
         var migrator = DatabaseMigrator()
         migrator.registerMigration("v1") { db in
@@ -83,14 +105,67 @@ public final class Store: @unchecked Sendable {
         migrator.registerMigration("v4_execution") { db in
             try db.alter(table: "messages") { $0.add(column: "execution", .text) }
         }
+        migrator.registerMigration("v5_task_board") { db in
+            try db.alter(table: "entries") { t in
+                t.add(column: "status", .text)
+                t.add(column: "priority", .text)
+                t.add(column: "completedAt", .datetime)
+            }
+            try db.execute(sql: "UPDATE entries SET status = CASE WHEN completed THEN 'completed' ELSE 'pending' END, priority = 'normal', completedAt = CASE WHEN completed THEN updatedAt ELSE NULL END WHERE kind = 'todo'")
+            try db.execute(sql: "CREATE INDEX entries_tasks ON entries(kind, status, priority, due)")
+        }
+        Self.registerSyncMigration(&migrator)
         try migrator.migrate(db)
     }
 
-    public func list() throws -> [Entry] {
-        try db.read { try Entry.order(Column("createdAt").desc, Column("id")).fetchAll($0) }
+    public func list(kind: String? = nil) throws -> [Entry] {
+        try db.read { db in
+            var query = Entry.all()
+            if let kind { query = query.filter(Column("kind") == kind) }
+            return try query.order(Column("createdAt").desc, Column("id")).fetchAll(db)
+        }
     }
 
-    public struct Page {
+    public struct Backup: Encodable {
+        public let entries: [Entry]
+        public let conversations: [String: [ChatMessage]]
+    }
+
+    /// Both tables come from one snapshot, with two queries regardless of conversation count.
+    public func backup() throws -> Backup {
+        try db.read { db in
+            let entries = try Entry.order(Column("createdAt").desc, Column("id")).fetchAll(db)
+            let messages = try ChatMessage.order(Column("id")).fetchAll(db)
+            var conversations = Dictionary(grouping: messages, by: \.entryID)
+            for entry in entries where entry.hasConversation && conversations[entry.id] == nil {
+                conversations[entry.id] = []
+            }
+            return Backup(entries: entries, conversations: conversations)
+        }
+    }
+
+    public func updateNote(id: String, text: String) throws -> Entry {
+        try change(id: id, text: text, noteOnly: true)
+    }
+
+    /// Independent of the timeline's 40-row window; searches full task conversations.
+    // ponytail: fetch matching tasks for column counts; move completed paging into SQL if large archives slow refresh.
+    public func todos(search: String = "", status: String = "all", priority: String? = nil) throws -> [Entry] {
+        guard ["all", "open"].contains(status) || TodoStatus(rawValue: status) != nil else { throw NotoError("任务状态无效。") }
+        if let priority, TodoPriority(rawValue: priority) == nil { throw NotoError("任务优先级无效。") }
+        return try db.read { db in
+            var query = Entry.filter(Column("kind") == "todo")
+            if status == "open" { query = query.filter(Column("status") != "completed") }
+            else if status != "all" { query = query.filter(Column("status") == status) }
+            if let priority { query = query.filter(Column("priority") == priority) }
+            if !search.isEmpty {
+                query = query.filter(sql: "instr(lower(entries.text), lower(?)) > 0 OR instr(COALESCE(due, ''), ?) > 0 OR EXISTS (SELECT 1 FROM messages WHERE messages.entryID = entries.id AND instr(lower(messages.text), lower(?)) > 0)", arguments: [search, search, search])
+            }
+            return try query.order(sql: "CASE status WHEN 'pending' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END, CASE WHEN status = 'completed' THEN completedAt END DESC, CASE WHEN status != 'completed' THEN priority = 'important' END DESC, CASE WHEN status != 'completed' THEN due IS NULL END ASC, CASE WHEN status != 'completed' THEN due END ASC, createdAt DESC, id ASC").fetchAll(db)
+        }
+    }
+
+    public struct Page: Sendable {
         public let entries: [Entry]
         public let hasMore: Bool
     }
@@ -113,7 +188,8 @@ public final class Store: @unchecked Sendable {
 
     /// Changes made by other connections; local writes explicitly refresh the UI.
     public func dataVersion() throws -> Int {
-        try db.read { try Int.fetchOne($0, sql: "PRAGMA data_version") ?? 0 }
+        // data_version is connection-local: always use the writer, never a pooled reader.
+        try db.writeWithoutTransaction { try Int.fetchOne($0, sql: "PRAGMA data_version") ?? 0 }
     }
 
     public func startConversation(_ question: String) throws -> Entry {
@@ -147,14 +223,14 @@ public final class Store: @unchecked Sendable {
         }
     }
 
-    public func add(kind: String, text: String, due: String? = nil, requestID: String? = nil) throws -> Entry {
-        let entry = Entry(kind: kind, text: text.trimmingCharacters(in: .whitespacesAndNewlines), due: due)
+    public func add(kind: String, text: String, due: String? = nil, requestID: String? = nil, status: String? = nil, priority: String? = nil) throws -> Entry {
+        let entry = Entry(kind: kind, text: text.trimmingCharacters(in: .whitespacesAndNewlines), due: due, status: status, priority: priority)
         try Self.validate(entry)
         return try db.write { db in
             if let requestID,
                let id = try String.fetchOne(db, sql: "SELECT entryID FROM requests WHERE key = ?", arguments: [requestID]),
                let existing = try Entry.fetchOne(db, key: id) {
-                guard existing.kind == entry.kind, existing.text == entry.text, existing.due == entry.due else {
+                guard existing.kind == entry.kind, existing.text == entry.text, existing.due == entry.due, existing.status == entry.status, existing.priority == entry.priority else {
                     throw NotoError("相同 request-id 已用于不同内容。")
                 }
                 return existing
@@ -165,24 +241,51 @@ public final class Store: @unchecked Sendable {
         }
     }
 
-    public func setCompleted(id: String, completed: Bool) throws -> Entry {
+    public func setCompleted(id: String, completed: Bool, expected: Entry? = nil) throws -> Entry {
+        try updateTodo(id: id, status: completed ? "completed" : "pending", expected: expected)
+    }
+
+    public func update(id: String, text: String, due: String?, expected: Entry? = nil) throws -> Entry {
+        try change(id: id, text: text, due: due, clearDue: due == nil, expected: expected)
+    }
+
+    public func updateTodo(id: String, text: String? = nil, due: String? = nil, clearDue: Bool = false,
+                           status: String? = nil, priority: String? = nil, expected: Entry? = nil) throws -> Entry {
+        try change(id: id, text: text, due: due, clearDue: clearDue, status: status, priority: priority, todoOnly: true, expected: expected)
+    }
+
+    public func convertToTodo(id: String, expected: Entry? = nil) throws -> Entry {
+        try change(id: id, convert: true, expected: expected)
+    }
+
+    private func change(id: String, text: String? = nil, due: String? = nil, clearDue: Bool = false,
+                        status: String? = nil, priority: String? = nil, todoOnly: Bool = false,
+                        convert: Bool = false, noteOnly: Bool = false, expected: Entry? = nil) throws -> Entry {
         try db.write { db in
-            guard var entry = try Entry.fetchOne(db, key: id), entry.kind == "todo" else { throw NotoError("没有找到这条待办。") }
-            entry.completed = completed; entry.updatedAt = Date()
+            guard var entry = try Entry.fetchOne(db, key: id), !todoOnly || entry.kind == "todo" else { throw NotoError("记录不存在或不是任务。") }
+            if noteOnly && entry.kind != "note" { throw NotoError("笔记不存在。") }
+            if let expected, expected != entry { throw NotoError("这条记录已在其他地方修改。草稿已保留，请取消后重新打开记录。") }
+            try Self.modify(&entry, text: text, due: due, clearDue: clearDue, status: status, priority: priority, convert: convert)
             try entry.update(db)
             return try Entry.fetchOne(db, key: entry.id)!
         }
     }
 
-    public func update(id: String, text: String, due: String?, expected: Entry? = nil) throws -> Entry {
-        try db.write { db in
-            guard var entry = try Entry.fetchOne(db, key: id) else { throw NotoError("记录不存在。") }
-            if let expected, expected != entry { throw NotoError("这条记录已在其他地方修改。草稿已保留，请取消后重新打开记录。") }
-            entry.text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            entry.due = due; entry.updatedAt = Date()
-            try Self.validate(entry); try entry.update(db)
-            return try Entry.fetchOne(db, key: entry.id)!
+    private static func modify(_ entry: inout Entry, text: String? = nil, due: String? = nil, clearDue: Bool = false,
+                               status: String? = nil, priority: String? = nil, convert: Bool = false) throws {
+        let before = entry
+        if convert && entry.kind == "note" { entry.kind = "todo"; entry.status = "pending"; entry.priority = "normal" }
+        if let text { entry.text = text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if clearDue && due != nil { throw NotoError("不能同时设置和清除截止日期。") }
+        if clearDue { entry.due = nil } else if let due { entry.due = due }
+        if let status {
+            if status != entry.status { entry.completedAt = status == "completed" ? Date() : nil }
+            entry.status = status
         }
+        if let priority { entry.priority = priority }
+        entry.completed = entry.status == "completed"
+        try validate(entry)
+        if entry != before { entry.updatedAt = Date() }
     }
 
     public func apply(_ actions: [AIAction], expected: [Entry]? = nil, replyingTo: ChatMessage? = nil, reply: String? = nil) throws -> [Entry] {
@@ -195,9 +298,10 @@ public final class Store: @unchecked Sendable {
                 }
             }
             if let expected {
+                let originals = Dictionary(expected.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
                 for action in actions where action.id != nil {
                     let id = action.id!
-                    guard expected.first(where: { $0.id == id }) == (try Entry.fetchOne(db, key: id)) else {
+                    guard originals[id] == (try Entry.fetchOne(db, key: id)) else {
                         throw NotoError("相关记录刚刚被修改，请重新提交这次操作。")
                     }
                 }
@@ -206,18 +310,18 @@ public final class Store: @unchecked Sendable {
             for action in actions {
                 switch action.operation {
                 case "add_note", "add_todo":
-                    let entry = Entry(kind: action.operation == "add_note" ? "note" : "todo", text: (action.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines), due: action.due)
+                    let entry = Entry(kind: action.operation == "add_note" ? "note" : "todo", text: (action.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines), due: action.due, status: action.status, priority: action.priority)
                     try Self.validate(entry); try entry.insert(db); result.append(entry)
-                case "complete", "reopen", "update":
+                case "complete", "reopen", "update", "convert_to_todo":
                     guard let id = action.id, var entry = try Entry.fetchOne(db, key: id) else { throw NotoError("AI 引用的记录不存在，未做任何修改。") }
-                    if action.operation == "update" {
-                        guard let text = action.text else { throw NotoError("修改缺少内容。") }
-                        entry.text = text.trimmingCharacters(in: .whitespacesAndNewlines); entry.due = action.due
-                    } else {
+                    if ["complete", "reopen"].contains(action.operation) {
                         guard entry.kind == "todo" else { throw NotoError("只能完成或重新打开待办。") }
-                        entry.completed = action.operation == "complete"
+                        try Self.modify(&entry, status: action.operation == "complete" ? "completed" : "pending")
+                    } else {
+                        try Self.modify(&entry, text: action.text, due: action.due, clearDue: action.clearDue ?? false,
+                                        status: action.status, priority: action.priority, convert: action.operation == "convert_to_todo")
                     }
-                    entry.updatedAt = Date(); try Self.validate(entry); try entry.update(db); result.append(entry)
+                    try entry.update(db); result.append(entry)
                 default: throw NotoError("AI 返回了不支持的操作，未做任何修改。")
                 }
             }
@@ -234,16 +338,27 @@ public final class Store: @unchecked Sendable {
             for changed in after {
                 guard try Entry.fetchOne(db, key: changed.id) == changed else { throw NotoError("记录已被其他操作修改，无法直接撤销。") }
             }
+            let originals = Dictionary(before.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             for changed in after {
-                if let original = before.first(where: { $0.id == changed.id }) { try original.update(db) }
+                if let original = originals[changed.id] { try original.update(db) }
                 else { _ = try Entry.deleteOne(db, key: changed.id) }
             }
         }
     }
 
     static func validate(_ entry: Entry) throws {
-        guard ["note", "todo"].contains(entry.kind), !entry.text.isEmpty, entry.text.count <= 50_000 else {
+        let length = entry.kind == "todo" ? entry.text.unicodeScalars.count : entry.text.count
+        guard ["note", "todo"].contains(entry.kind), !entry.text.isEmpty, length <= 50_000 else {
             throw NotoError("内容不能为空，且不能超过 50,000 字。")
+        }
+        if entry.kind == "todo" {
+            guard let status = entry.status, TodoStatus(rawValue: status) != nil,
+                  let priority = entry.priority, TodoPriority(rawValue: priority) != nil,
+                  entry.completed == (status == "completed"), (entry.completedAt != nil) == entry.completed else {
+                throw NotoError("任务状态或优先级无效。")
+            }
+        } else if entry.status != nil || entry.priority != nil || entry.completedAt != nil || entry.completed {
+            throw NotoError("只有任务可以设置状态和优先级。")
         }
         if let due = entry.due {
             let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -261,7 +376,11 @@ public struct AIAction: Codable, Sendable {
     public var id: String?
     public var text: String?
     public var due: String?
-    public init(operation: String, id: String? = nil, text: String? = nil, due: String? = nil) {
+    public var status: String?
+    public var priority: String?
+    public var clearDue: Bool?
+    public init(operation: String, id: String? = nil, text: String? = nil, due: String? = nil, status: String? = nil, priority: String? = nil, clearDue: Bool? = nil) {
+        self.status = status; self.priority = priority; self.clearDue = clearDue
         self.operation = operation; self.id = id; self.text = text; self.due = due
     }
 }

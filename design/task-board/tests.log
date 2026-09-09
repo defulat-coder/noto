@@ -1,0 +1,63 @@
+[1/1] Compiling plugin GenerateManual
+[2/2] Compiling plugin GenerateDoccReference
+Building for debugging...
+[2/9] Write sources
+[3/9] Write swift-version--58304C5D6DBC2206.txt
+[5/9] Compiling NotoApp TaskBoard.swift
+[6/9] Emitting module NotoApp
+[7/10] Compiling NotoApp NotoApp.swift
+[7/12] Write Objects.LinkFileList
+[8/12] Linking NotoDesktop
+[9/12] Applying NotoDesktop
+[11/14] Emitting module NotoAppTests
+[12/14] Compiling NotoAppTests InteractionTests.swift
+[12/14] Write Objects.LinkFileList
+[13/14] Linking NotoPackageTests
+Build complete! (6.60s)
+Test Suite 'All tests' started at 2026-09-09 01:20:29.768.
+Test Suite 'NotoPackageTests.xctest' started at 2026-09-09 01:20:29.768.
+Test Suite 'InteractionTests' started at 2026-09-09 01:20:29.768.
+Test Case '-[NotoAppTests.InteractionTests testBoardCreationFiltersConversionAndDirtyProtection]' started.
+Test Case '-[NotoAppTests.InteractionTests testBoardCreationFiltersConversionAndDirtyProtection]' passed (0.012 seconds).
+Test Case '-[NotoAppTests.InteractionTests testBoardExternalRefreshDragConflictAndCompletedLimit]' started.
+Test Case '-[NotoAppTests.InteractionTests testBoardExternalRefreshDragConflictAndCompletedLimit]' passed (0.047 seconds).
+Test Case '-[NotoAppTests.InteractionTests testDraftMovementAndDirtyEditProtection]' started.
+Test Case '-[NotoAppTests.InteractionTests testDraftMovementAndDirtyEditProtection]' passed (0.005 seconds).
+Test Case '-[NotoAppTests.InteractionTests testEmptyEditAndTodoMetadata]' started.
+Test Case '-[NotoAppTests.InteractionTests testEmptyEditAndTodoMetadata]' passed (0.004 seconds).
+Test Case '-[NotoAppTests.InteractionTests testInlineEditPreservesConversationAndRejectsConcurrentChange]' started.
+Test Case '-[NotoAppTests.InteractionTests testInlineEditPreservesConversationAndRejectsConcurrentChange]' passed (0.005 seconds).
+Test Case '-[NotoAppTests.InteractionTests testMarkedTextCannotSubmit]' started.
+Test Case '-[NotoAppTests.InteractionTests testMarkedTextCannotSubmit]' passed (0.182 seconds).
+Test Suite 'InteractionTests' passed at 2026-09-09 01:20:30.025.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.256 (0.256) seconds
+Test Suite 'StoreTests' started at 2026-09-09 01:20:30.025.
+Test Case '-[NotoCoreTests.StoreTests testAtomicActionsIdempotencyAndUndoConflict]' started.
+Test Case '-[NotoCoreTests.StoreTests testAtomicActionsIdempotencyAndUndoConflict]' passed (0.005 seconds).
+Test Case '-[NotoCoreTests.StoreTests testConversationPersistsSearchesAndCommitsAtomically]' started.
+Test Case '-[NotoCoreTests.StoreTests testConversationPersistsSearchesAndCommitsAtomically]' passed (0.011 seconds).
+Test Case '-[NotoCoreTests.StoreTests testHistoryPaginationDoesNotSkipOrRepeatAfterNewInsertion]' started.
+Test Case '-[NotoCoreTests.StoreTests testHistoryPaginationDoesNotSkipOrRepeatAfterNewInsertion]' passed (0.021 seconds).
+Test Case '-[NotoCoreTests.StoreTests testSharedDatabaseAndAgentParsing]' started.
+Test Case '-[NotoCoreTests.StoreTests testSharedDatabaseAndAgentParsing]' passed (0.008 seconds).
+Test Suite 'StoreTests' passed at 2026-09-09 01:20:30.071.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.046 (0.046) seconds
+Test Suite 'TaskTests' started at 2026-09-09 01:20:30.071.
+Test Case '-[NotoCoreTests.TaskTests testConversionAIAtomicityAndUndo]' started.
+Test Case '-[NotoCoreTests.TaskTests testConversionAIAtomicityAndUndo]' passed (0.005 seconds).
+Test Case '-[NotoCoreTests.TaskTests testMigrationFromV4]' started.
+Test Case '-[NotoCoreTests.TaskTests testMigrationFromV4]' passed (0.007 seconds).
+Test Case '-[NotoCoreTests.TaskTests testQueryBeyondTimelineAndOrderAndIdempotency]' started.
+Test Case '-[NotoCoreTests.TaskTests testQueryBeyondTimelineAndOrderAndIdempotency]' passed (0.012 seconds).
+Test Case '-[NotoCoreTests.TaskTests testTransitionsPreserveCompletionTimeAndPartialFields]' started.
+Test Case '-[NotoCoreTests.TaskTests testTransitionsPreserveCompletionTimeAndPartialFields]' passed (0.005 seconds).
+Test Suite 'TaskTests' passed at 2026-09-09 01:20:30.101.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.030 (0.030) seconds
+Test Suite 'NotoPackageTests.xctest' passed at 2026-09-09 01:20:30.101.
+	 Executed 14 tests, with 0 failures (0 unexpected) in 0.331 (0.333) seconds
+Test Suite 'All tests' passed at 2026-09-09 01:20:30.101.
+	 Executed 14 tests, with 0 failures (0 unexpected) in 0.331 (0.334) seconds
+◇ Test run started.
+↳ Testing Library Version: 1501
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

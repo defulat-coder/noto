@@ -29,4 +29,27 @@ with tempfile.TemporaryDirectory(prefix='noto-cli-qa-') as directory:
     assert run('search', '不存在的关键词') == []
     backup = run('export', '--include-conversations')
     assert len(backup['entries']) == 2 and backup['conversations'] == {}
-    print('PASS: create, idempotency, conflict, complete, filter, reopen, edit, clear date, invalid date, search, export')
+    important = run('todo', 'add', '--title', '重点任务', '--status', 'in_progress', '--priority', 'important', '--request-id', 'task-v5')
+    assert important['status'] == 'in_progress' and important['priority'] == 'important'
+    assert run('todo', 'add', '--title', '重点任务', '--status', 'in_progress', '--priority', 'important', '--request-id', 'task-v5')['id'] == important['id']
+    run('todo', 'add', '--title', '重点任务', '--priority', 'normal', '--request-id', 'task-v5', fails=True)
+    run('todo', 'add', '--title', '非法状态', '--status', 'bad', fails=True)
+    run('todo', 'update', '--id', important['id'], '--priority', 'high', fails=True)
+    assert run('todo', 'list', '--status', 'in_progress', '--priority', 'important')[0]['id'] == important['id']
+    assert len(run('todo', 'list', '--status', 'open')) == 2
+    changed = run('todo', 'update', '--id', important['id'], '--due', '2026-09-11')
+    assert changed['status'] == 'in_progress' and changed['priority'] == 'important'
+    done = run('todo', 'update', '--id', important['id'], '--status', 'completed')
+    assert done['completed'] and done.get('completedAt')
+    assert run('todo', 'update', '--id', important['id'], '--title', '完成后编辑')['completedAt'] == done['completedAt']
+    assert run('todo', 'complete', '--id', important['id'])['completedAt'] == done['completedAt']
+    reopened = run('todo', 'reopen', '--id', important['id'])
+    assert reopened['status'] == 'pending' and reopened.get('completedAt') is None
+    converted = run('note', 'convert-to-todo', '--id', note['id'])
+    assert converted['kind'] == 'todo' and converted['status'] == 'pending'
+    assert converted['createdAt'] == note['createdAt']
+    assert run('note', 'convert-to-todo', '--id', note['id']) == converted
+    run('todo', 'update', '--id', converted['id'], '--status', 'in_progress', '--priority', 'important')
+    assert run('note', 'convert-to-todo', '--id', note['id'])['status'] == 'in_progress'
+    assert all('status' in row and 'priority' in row for row in run('export'))
+    print('PASS: task status, priority, partial update, conversion, completion timestamp, legacy aliases; create, idempotency, conflict, complete, filter, reopen, edit, clear date, invalid date, search, export')

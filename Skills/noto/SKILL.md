@@ -1,6 +1,6 @@
 ---
 name: noto
-description: Read, capture, search and update the user's local Noto notes and todos through its native CLI. Use when the user asks to record a thought, add or complete a todo, or retrieve their Noto data.
+description: Read, capture, search and update the user's local Noto notes and todos through its native CLI. Use when the user asks to record a thought, add, prioritize, start or complete a todo, or retrieve their Noto data.
 ---
 
 # Noto
@@ -21,6 +21,11 @@ noto todo reopen --id FULL_ID --json
 noto note update --id FULL_ID --text '更新后的小记' --json
 noto todo update --id FULL_ID --due 2026-09-10 --json
 noto todo update --id FULL_ID --clear-due --json
+noto todo add --title '重点任务' --status pending --priority important --request-id task-key --json
+noto todo update --id FULL_ID --status in_progress --json
+noto todo update --id FULL_ID --priority normal --json
+noto todo list --status open --priority important --json
+noto note convert-to-todo --id FULL_ID --json
 noto export --json
 noto export --include-conversations --json
 ```
@@ -34,3 +39,22 @@ For retried creation use the same unique --request-id and identical content. Dis
 GUI and CLI use ~/Library/Application Support/Noto/notes.sqlite by default. The GUI refreshes external changes automatically. `--database PATH` or NOTO_DATABASE is available for isolated testing; never override the real database path during normal use.
 
 You already are the agent: call the data commands directly, not `noto ask`, which would recursively invoke another agent.
+
+Task status is `pending`, `in_progress`, or `completed`; priority is `normal` or `important`. Defaults are pending and normal. Mark important only when the user explicitly asks; do not infer importance from urgency or deadlines. `list --status open` includes pending and in_progress, and `--status all` is the default. Omit `--priority` to list both priorities.
+
+`todo update` changes only supplied fields, preserving all others. Use `--clear-due` to remove a date and never combine it with `--due`. To start work set status in_progress; `complete` sets completed; `reopen` returns to pending. JSON includes status, priority and the legacy completed boolean; completedAt is present on completed tasks. Repeated completion and edits to completed task text preserve its completion timestamp.
+
+`note convert-to-todo --id` converts the original record, preserving ID, creation time, text and conversation. It defaults to pending/normal; repeating the command on an existing task preserves its current properties. It does not create a duplicate task. Existing notes cannot receive task fields until converted.
+
+### Calendar placement
+
+The calendar is another view of todos, grouped by the existing local `YYYY-MM-DD` due date. No event or time-slot record is needed.
+
+```sh
+# Move to September 11 in the task calendar; preserve status/priority/completedAt.
+noto todo update --id FULL_ID --due 2026-09-11 --json
+# Move to the Unscheduled tray, including for a completed task.
+noto todo update --id FULL_ID --clear-due --json
+```
+
+Completed tasks stay on their due date. Do not convert date-only strings through UTC. A structured `update` action uses the same due/clearDue fields; changing calendar placement must not infer or alter status or priority.

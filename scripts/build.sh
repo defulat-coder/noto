@@ -12,10 +12,28 @@ CHECK
 swift build -c release
 BIN=$(swift build -c release --show-bin-path)
 APP="$PWD/build/Noto.app"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$PWD/build/bin"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks" "$PWD/build/bin"
 chmod -R u+w "$APP/Contents/Resources"
 cp "$BIN/NotoDesktop" "$APP/Contents/MacOS/Noto"
 cp "$BIN/noto" "$PWD/build/bin/noto"
+# SwiftPM leaves dynamic binary targets beside the executable. Bundle them so the
+# installed app does not depend on the build directory or the developer's Xcode.
+for framework in "$BIN"/*.framework(N); do
+    ditto "$framework" "$APP/Contents/Frameworks/${framework:t}"
+done
+xcrun swift-stdlib-tool --copy --platform macosx \
+    --scan-executable "$APP/Contents/MacOS/Noto" \
+    --scan-folder "$APP/Contents/Frameworks" \
+    --destination "$APP/Contents/Frameworks"
+python3 - "$APP/Contents/MacOS/Noto" <<'RPATH'
+import re, subprocess, sys
+binary = sys.argv[1]
+commands = subprocess.check_output(["otool", "-l", binary], text=True)
+for path in re.findall(r"cmd LC_RPATH\n\s+cmdsize \d+\n\s+path (.*?) \(offset", commands):
+    if ".xctoolchain/" in path:
+        subprocess.run(["install_name_tool", "-delete_rpath", path, binary], check=True)
+RPATH
+cp design/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 for resource in "$BIN"/*.bundle(N); do
     cp -R "$resource" "$APP/Contents/Resources/"
 done
@@ -27,6 +45,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Noto</string>
 <key>CFBundleDisplayName</key><string>noto</string>
 <key>CFBundleExecutable</key><string>Noto</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
 <key>CFBundleVersion</key><string>1</string>
@@ -39,11 +58,14 @@ PLIST
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
 cp .build/checkouts/GRDB.swift/LICENSE "$APP/Contents/Resources/GRDB-LICENSE.txt"
 cp .build/checkouts/swift-argument-parser/LICENSE.txt "$APP/Contents/Resources/ArgumentParser-LICENSE.txt"
-# This app has no nested executable code; sign the app after copying resources.
-if [[ -n "${SIGNING_IDENTITY:-}" ]]; then
-    codesign --force --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP"
-else
-    codesign --force --sign - "$APP"
-fi
+cp .build/checkouts/powersync-swift/LICENSE "$APP/Contents/Resources/PowerSync-LICENSE.txt"
+# Sign from the inside out; the outer signature seals nested frameworks and Swift
+# compatibility libraries (including libswiftCompatibilitySpan when required).
+signing_args=(--force --sign "${SIGNING_IDENTITY:--}")
+if [[ -n "${SIGNING_IDENTITY:-}" ]]; then signing_args+=(--options runtime --timestamp); fi
+for nested in "$APP/Contents/Frameworks"/*.framework(N) "$APP/Contents/Frameworks"/*.dylib(N); do
+    codesign "${signing_args[@]}" "$nested"
+done
+codesign "${signing_args[@]}" "$APP"
 codesign --verify --deep --strict "$APP"
 echo "$APP"
