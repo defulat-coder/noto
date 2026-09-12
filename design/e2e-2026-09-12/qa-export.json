@@ -1,0 +1,104 @@
+{
+  "conversations" : {
+    "5b5ae6dc-df5b-413d-a4c0-503d3303f24b" : [
+      {
+        "createdAt" : "2026-09-12T08:21:57Z",
+        "entryID" : "5b5ae6dc-df5b-413d-a4c0-503d3303f24b",
+        "execution" : "已读取 0 条历史消息与 1 条记录\n已启动 OpenCode，等待回复\nCLI 已返回，检查回复\n已保存回复，更新 1 条记录 · 3 秒",
+        "id" : 1,
+        "role" : "user",
+        "text" : "把这条记录转为任务，文字改成「整理周末的想法」，标记为重要。"
+      },
+      {
+        "createdAt" : "2026-09-12T08:22:01Z",
+        "entryID" : "5b5ae6dc-df5b-413d-a4c0-503d3303f24b",
+        "id" : 2,
+        "role" : "assistant",
+        "text" : "已把这条记录转为任务「整理周末的想法」，标记为重要。"
+      },
+      {
+        "createdAt" : "2026-09-12T08:22:12Z",
+        "entryID" : "5b5ae6dc-df5b-413d-a4c0-503d3303f24b",
+        "execution" : "已读取 2 条历史消息与 1 条记录\n已启动 OpenCode，等待回复\nCLI 已返回，检查回复\n已保存回复，更新 1 条记录 · 3 秒",
+        "id" : 3,
+        "role" : "user",
+        "text" : "再把它的截止日期设为明天，状态改为进行中。"
+      },
+      {
+        "createdAt" : "2026-09-12T08:22:15Z",
+        "entryID" : "5b5ae6dc-df5b-413d-a4c0-503d3303f24b",
+        "id" : 4,
+        "role" : "assistant",
+        "text" : "已把任务「整理周末的想法」的截止日期设为明天（2026-09-13），状态改为进行中，重要标记保持不变。"
+      }
+    ]
+  },
+  "entries" : [
+    {
+      "completed" : false,
+      "createdAt" : "2026-09-12T08:21:32Z",
+      "due" : "2026-09-13",
+      "hasConversation" : true,
+      "id" : "5b5ae6dc-df5b-413d-a4c0-503d3303f24b",
+      "kind" : "todo",
+      "priority" : "important",
+      "status" : "in_progress",
+      "text" : "整理周末的想法",
+      "updatedAt" : "2026-09-12T08:22:15Z"
+    },
+    {
+      "completed" : true,
+      "completedAt" : "2026-09-12T08:20:51Z",
+      "createdAt" : "2026-09-12T08:20:51Z",
+      "hasConversation" : false,
+      "id" : "50168bf1-75f4-40e8-afc4-5b2b0eb316e1",
+      "kind" : "todo",
+      "priority" : "normal",
+      "status" : "completed",
+      "text" : "把灵感收进一个地方",
+      "updatedAt" : "2026-09-12T08:20:51Z"
+    },
+    {
+      "completed" : false,
+      "createdAt" : "2026-09-12T08:20:51Z",
+      "due" : "2026-09-13",
+      "hasConversation" : false,
+      "id" : "3c9099ef-f44b-4a4c-916f-b910aa423f84",
+      "kind" : "todo",
+      "priority" : "normal",
+      "status" : "pending",
+      "text" : "读完收藏的设计文章",
+      "updatedAt" : "2026-09-12T08:20:51Z"
+    },
+    {
+      "completed" : false,
+      "createdAt" : "2026-09-12T08:20:51Z",
+      "due" : "2026-09-12",
+      "hasConversation" : false,
+      "id" : "916ce8c9-252e-4fb4-914a-0059925a8cee",
+      "kind" : "todo",
+      "priority" : "important",
+      "status" : "in_progress",
+      "text" : "整理下一版的交互草图",
+      "updatedAt" : "2026-09-12T08:20:51Z"
+    },
+    {
+      "completed" : false,
+      "createdAt" : "2026-09-12T08:20:51Z",
+      "hasConversation" : false,
+      "id" : "e025b82e-33bb-4f0c-a28a-bf8483260e89",
+      "kind" : "note",
+      "text" : "周末留一点时间，回看这一周的想法。",
+      "updatedAt" : "2026-09-12T08:20:51Z"
+    },
+    {
+      "completed" : false,
+      "createdAt" : "2026-09-12T08:20:51Z",
+      "hasConversation" : false,
+      "id" : "76e29c00-b26a-4688-9a89-8730d8a21e4a",
+      "kind" : "note",
+      "text" : "好工具应该让人先记下来，再慢慢理清楚。",
+      "updatedAt" : "2026-09-12T08:20:51Z"
+    }
+  ]
+}

@@ -4,6 +4,57 @@ import NotoCore
 @testable import NotoApp
 
 final class InteractionTests: XCTestCase {
+    func testNewContentIsVisibleAfterSavingFromSearchAndImportantFilter() async throws {
+        try await Task { @MainActor in
+            let model = AppModel(store: try Store(url: nil))
+            await model.waitForReload()
+            model.setSearch("不会匹配"); model.showComposer(); model.draft = "新的小记"; model.save()
+            await model.waitForReload()
+            XCTAssertTrue(model.search.isEmpty)
+            XCTAssertEqual(model.entries.first?.text, "新的小记")
+            model.switchMode(.board); model.setSearch("不会匹配"); model.setImportantOnly(true)
+            model.showNewTask(); model.taskDraft = "普通任务"; model.saveNewTask()
+            await model.waitForReload()
+            XCTAssertTrue(model.search.isEmpty)
+            XCTAssertFalse(model.importantOnly)
+            XCTAssertEqual(model.visibleTasks.first?.text, "普通任务")
+            model.switchMode(.notes); model.showComposer(); model.draft = "被浮层遮住的草稿"
+            model.recentlyDeleted = true; model.submitFocusedInput()
+            XCTAssertEqual(model.draft, "被浮层遮住的草稿")
+        }.value
+    }
+
+    func testDiscussionUsesExplicitRecordContextWithoutDuplicatingTheNote() async throws {
+        try await Task { @MainActor in
+            let store = try Store(url: nil)
+            let note = try store.add(kind: "note", text: "讨论已有记录")
+            let task = try store.add(kind: "todo", text: "另一个任务")
+            let model = AppModel(store: store)
+            await model.waitForReload()
+            model.openConversation(note)
+            XCTAssertTrue(model.messages.isEmpty)
+            XCTAssertEqual(model.aiContext.map(\.id), [note.id])
+            let changed = try store.convertToTodo(id: note.id)
+            XCTAssertEqual(try model.replyContext(), [changed])
+            _ = try store.updateTodo(id: note.id, due: "2026-09-13")
+            XCTAssertEqual(try model.replyContext().first?.due, "2026-09-13")
+            XCTAssertEqual(try store.list().count, 2)
+            XCTAssertTrue(try store.messages(for: note.id).isEmpty)
+            model.aiUsesCurrentView = true
+            XCTAssertEqual(Set(model.aiContext.map(\.id)), Set([note.id, task.id]))
+            model.chatDraft = "保留这个问题"; model.closeConversation()
+            model.openConversation(task)
+            XCTAssertFalse(model.aiUsesCurrentView)
+            XCTAssertEqual(model.aiContext.map(\.id), [task.id])
+            model.openConversation(note)
+            XCTAssertEqual(model.chatDraft, "保留这个问题")
+            model.aiUsesCurrentView = true
+            model.replaceAccountStore(try Store(url: nil))
+            XCTAssertFalse(model.aiUsesCurrentView)
+            XCTAssertTrue(model.aiContext.isEmpty)
+        }.value
+    }
+
     func testNoteSubmissionSavesLocallyWhileAIIsBusy() async throws {
         try await Task { @MainActor in
             let store = try Store(url: nil)

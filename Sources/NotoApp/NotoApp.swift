@@ -44,6 +44,8 @@ final class AppModel: ObservableObject {
     @Published var editHasDue = false
     @Published var editDate = Date()
     @Published var settings = false
+    @Published var recentlyDeleted = false
+    @Published var aiUsesCurrentView = false
     @Published var undoAvailable = false
     @Published var provider: Provider { didSet { UserDefaults.standard.set(provider.rawValue, forKey: "provider") } }
     private(set) var store: Store?
@@ -147,6 +149,7 @@ final class AppModel: ObservableObject {
         reloadGeneration += 1; dataVersion = nil
         store = replacement
         entries = []; tasks = []; messages = []; conversation = nil; chatDrafts = [:]
+        aiUsesCurrentView = false
         undoBefore = []; undoAfter = []; undoAvailable = false; lastDeletedTaskID = nil
         editing = nil; editDraft = ""; editError = ""; draft = ""; chatDraft = ""; chatError = ""
         taskCreating = false; taskDraftStarted = false; taskDraft = ""; taskDraftHasDue = false; taskDraftImportant = false
@@ -172,11 +175,14 @@ final class AppModel: ObservableObject {
     }
 
     func restoreLastDeletedTask() {
-        guard let id = lastDeletedTaskID, let store else { return }
-        do {
-            try store.restoreTodo(id: id); lastDeletedTaskID = nil
-            message = "已恢复任务。"; isError = false; reload()
-        } catch { fail(error) }
+        guard let id = lastDeletedTaskID else { return }
+        do { try restoreTask(id) } catch { fail(error) }
+    }
+    func restoreTask(_ id: String) throws {
+        guard let store else { throw NotoError("无法打开本地数据。") }
+        try store.restoreTodo(id: id)
+        if lastDeletedTaskID == id { lastDeletedTaskID = nil }
+        message = "已恢复任务。"; isError = false; reload()
     }
 
     static func dateKey(_ date: Date) -> String {
@@ -196,6 +202,13 @@ final class AppModel: ObservableObject {
     }
 
     var filtered: [Entry] { mode.isTaskView ? visibleTasks : entries }
+    var aiContext: [Entry] {
+        if aiUsesCurrentView { return filtered }
+        return conversation.map { [$0] } ?? []
+    }
+    var aiContextLabel: String {
+        aiUsesCurrentView ? "\(mode.isTaskView ? "筛选任务" : "已载入记录") · \(aiContext.count) 条" : "当前记录"
+    }
     struct DayGroup: Identifiable {
         let id: String
         let date: Date
@@ -366,7 +379,7 @@ final class AppModel: ObservableObject {
         search = value
     }
     func submitFocusedInput() {
-        guard !settings else { return }
+        guard !settings, !recentlyDeleted else { return }
         if let input = NSApp.keyWindow?.firstResponder as? InputTextView { input.submit() }
         else if taskCreating { saveNewTask() }
         else if editing != nil { saveEditing() }
@@ -386,6 +399,7 @@ final class AppModel: ObservableObject {
         do {
             let entry = try store.add(kind: isTodo ? "todo" : "note", text: content)
             draft = ""; composerPosition = nil
+            if !search.isEmpty { search = "" }
             remember(before: [], after: [entry], message: isTodo ? "已添加待办。" : "已记下。")
         } catch { fail(error) }
     }
@@ -417,6 +431,7 @@ final class AppModel: ObservableObject {
         do {
             if let conversation { chatDrafts[conversation.id] = chatDraft }
             conversation = try store.startConversation(input)
+            aiUsesCurrentView = false
             messages = try store.messages(for: conversation!.id)
             draft = ""; composerPosition = nil; readingRequested = false; chatDraft = ""; chatError = ""; message = ""; reload()
             requestReply()
@@ -427,6 +442,7 @@ final class AppModel: ObservableObject {
         do {
             messages = try store?.messages(for: entry.id) ?? []
             if let conversation { chatDrafts[conversation.id] = chatDraft }
+            if conversation?.id != entry.id { aiUsesCurrentView = false }
             conversation = entry; chatDraft = chatDrafts[entry.id] ?? ""; chatError = ""
             composerPosition = nil; readingRequested = false
         } catch { fail(error) }
@@ -445,14 +461,24 @@ final class AppModel: ObservableObject {
             requestReply()
         } catch { chatError = error.localizedDescription }
     }
+    func replyContext() throws -> [Entry] {
+        guard let store, let conversation,
+              let current = try store.entry(id: conversation.id) else { throw NotoError("这条记录已不存在，请返回记录列表。") }
+        self.conversation = current
+        if aiUsesCurrentView { return filtered.map { $0.id == current.id ? current : $0 } }
+        return [current]
+    }
     func requestReply() {
         guard !busy, let store, let question = messages.last, question.role == "user" else { return }
-        let history = Array(messages.dropLast()), context = filtered
+        let context: [Entry]
+        do { context = try replyContext() }
+        catch { chatError = error.localizedDescription; return }
+        let history = Array(messages.dropLast())
         let selectedProvider = provider
         let active = AgentRunner(); runner = active
         busy = true; chatError = ""
         let startedAt = Date()
-        recordExecution("已读取 \(history.count) 条历史消息与 \(context.count) 条笔记", for: question)
+        recordExecution("已读取 \(history.count) 条历史消息与 \(context.count) 条记录", for: question)
         Task {
             do {
                 let response = try await Task.detached(priority: .userInitiated) {
@@ -461,6 +487,7 @@ final class AppModel: ObservableObject {
                     }
                 }.value
                 let changed = try store.apply(response.actions, expected: context, replyingTo: question, reply: response.message)
+                if let updated = changed.first(where: { $0.id == conversation?.id }) { conversation = updated }
                 if !changed.isEmpty { remember(before: context, after: changed, message: "已更新记录。") }
                 messages = try store.messages(for: question.entryID)
                 recordExecution("已保存回复\(changed.isEmpty ? "" : "，更新 \(changed.count) 条记录") · \(Int(Date().timeIntervalSince(startedAt))) 秒", for: question)
@@ -511,20 +538,21 @@ struct NotoApp: App {
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("新建内容") { model.showComposer() }.keyboardShortcut("n")
-                Button("提交当前输入") { model.submitFocusedInput() }.keyboardShortcut(.return, modifiers: .command)
+                Button("新建内容") { model.showComposer() }.keyboardShortcut("n").disabled(model.settings || model.recentlyDeleted)
+                Button("提交当前输入") { model.submitFocusedInput() }.keyboardShortcut(.return, modifiers: .command).disabled(model.settings || model.recentlyDeleted)
                 Button("添加待办") { model.save(todo: true) }.keyboardShortcut(.return, modifiers: [.command, .shift])
-                    .disabled(model.composerPosition == nil || model.busy)
+                    .disabled(model.composerPosition == nil || model.settings || model.recentlyDeleted)
             }
             CommandGroup(replacing: .undoRedo) {
                 Button("撤销文本编辑") { NSApp.sendAction(Selector(("undo:")), to: nil, from: nil) }.keyboardShortcut("z")
                 Button("重做文本编辑") { NSApp.sendAction(Selector(("redo:")), to: nil, from: nil) }.keyboardShortcut("z", modifiers: [.command, .option])
-                Button("撤销上次记录操作") { model.undo() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!model.undoAvailable)
-                Button("恢复上次删除的任务") { model.restoreLastDeletedTask() }.disabled(model.lastDeletedTaskID == nil)
+                Button("撤销上次记录操作") { model.undo() }.keyboardShortcut("z", modifiers: [.command, .shift]).disabled(!model.undoAvailable || model.settings || model.recentlyDeleted)
+                Button("恢复上次删除的任务") { model.restoreLastDeletedTask() }.disabled(model.lastDeletedTaskID == nil || model.settings || model.recentlyDeleted)
+                Button("最近删除…") { model.recentlyDeleted = true }.disabled(model.settings || model.recentlyDeleted)
             }
             CommandGroup(after: .toolbar) {
                 ForEach(ContentMode.allCases) { mode in
-                    Button("显示\(mode.label)") { model.switchMode(mode) }.keyboardShortcut(mode.shortcut, modifiers: .command)
+                    Button("显示\(mode.label)") { model.switchMode(mode) }.keyboardShortcut(mode.shortcut, modifiers: .command).disabled(model.settings || model.recentlyDeleted)
                 }
             }
             CommandGroup(after: .textEditing) {
@@ -533,7 +561,7 @@ struct NotoApp: App {
                     model.composerPosition = nil
                     model.closeConversation()
                     DispatchQueue.main.async { NotificationCenter.default.post(name: .focusSearch, object: nil) }
-                }.keyboardShortcut("k")
+                }.keyboardShortcut("k").disabled(model.settings || model.recentlyDeleted)
             }
             CommandGroup(replacing: .appSettings) {
                 Button("设置…") { model.settings = true }.keyboardShortcut(",")
@@ -658,7 +686,7 @@ struct ContentView: View {
                             ViewModeMenu(model: model)
                             if model.mode == .notes {
                                 Button { model.showComposer() } label: { ActionIcon("square.and.pencil") }
-                                    .buttonStyle(QuietButtonStyle(icon: true)).help("写笔记（⌘N）").accessibilityLabel("写笔记")
+                                    .buttonStyle(QuietButtonStyle(icon: true)).help("写一笔（⌘N）").accessibilityLabel("写一笔")
                             }
                             if narrow && model.conversation != nil {
                                 Button {
@@ -668,14 +696,20 @@ struct ContentView: View {
                                     .buttonStyle(QuietButtonStyle(icon: true)).help("返回当前对话").accessibilityLabel("返回当前对话")
                             }
                             Spacer()
+                            Button { model.settings = true } label: {
+                                Label(model.sync?.isSignedIn == true ? "账号" : "本机", systemImage: model.sync?.isSignedIn == true ? "person.crop.circle" : "internaldrive")
+                                    .font(NotoDesign.caption).foregroundStyle(.secondary)
+                            }.buttonStyle(QuietButtonStyle())
+                                .help(model.sync?.isSignedIn == true ? "当前账号：\(model.sync?.email ?? "") · \(model.sync?.status ?? "")" : "当前内容保存在本机 · 打开设置")
+                                .accessibilityLabel("\(model.sync?.isSignedIn == true ? "账号空间" : "本机空间")，打开设置")
                             if model.reloading { ProgressView().controlSize(.small).help("正在读取记录") }
-                            SearchInput(text: Binding(get: { model.search }, set: { model.setSearch($0) }), placeholder: model.mode.isTaskView ? "搜索任务与对话" : "搜索笔记与对话").frame(width: 190, height: 28)
+                            SearchInput(text: Binding(get: { model.search }, set: { model.setSearch($0) }), placeholder: model.mode.isTaskView ? "搜索任务与对话" : "搜索记录与对话").frame(width: geometry.size.width < 800 ? 154 : 190, height: 28)
                         }.padding(.leading, 86).padding(.trailing, 20).padding(.top, 10)
                     }
                 }
                 if model.conversation != nil && (!narrow || showChatOnly) {
                     if !narrow { Divider() }
-                    ConversationView(model: model)
+                    ConversationView(model: model, compact: narrow)
                         .frame(width: narrow ? geometry.size.width : min(440, max(340, geometry.size.width * 0.37)))
                 }
             }
@@ -698,6 +732,7 @@ struct ContentView: View {
             if !value { _ = model.leaveUnchangedEditor() }
         })) { TaskEditor(model: model) }
         .sheet(isPresented: $model.settings) { SettingsView(model: model) }
+        .sheet(isPresented: $model.recentlyDeleted) { RecentlyDeletedView(model: model) }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refreshIfChanged() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in model.cancel() }
     }
@@ -735,10 +770,12 @@ private struct ReadingPane: View {
                         if model.entries.isEmpty && model.editing == nil {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text(model.search.isEmpty ? "留下一点今天。" : "没有找到相关记录").font(.system(size: 17, weight: .medium))
-                                Text(model.search.isEmpty ? "点击编写，或按 ⌘N。" : "试试其他关键词。")
+                                Text(model.search.isEmpty ? "想法、待办，先记下来。" : "试试其他关键词。")
                                     .font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(5)
                                 if !model.search.isEmpty {
                                     Button("清空搜索") { model.setSearch("") }.buttonStyle(QuietButtonStyle()).font(NotoDesign.caption)
+                                } else {
+                                    Button("写一笔") { model.showComposer() }.buttonStyle(QuietButtonStyle(prominent: true)).help("新建记录（⌘N）")
                                 }
                             }.excludeFromBlankInput()
                         } else {
@@ -803,6 +840,7 @@ private struct NewContentInput: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
+                Text("记一笔").font(NotoDesign.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button { model.composerPosition = nil } label: { ActionIcon("xmark") }
                     .buttonStyle(QuietButtonStyle(icon: true)).accessibilityLabel("收起录入，保留草稿")
@@ -813,7 +851,10 @@ private struct NewContentInput: View {
             HStack(spacing: 6) {
                 Button("询问 AI") { model.ask() }.disabled(model.busy)
                 Spacer(minLength: 0)
-                Button("保存") { model.save() }.buttonStyle(QuietButtonStyle(prominent: true)).help("保存笔记（⌘↵）；回车换行")
+                Menu { Button("存为任务") { model.save(todo: true) } } label: {
+                    ActionIcon("chevron.down")
+                }.actionMenuStyle().help("其他保存方式").accessibilityLabel("其他保存方式")
+                Button("保存小记") { model.save() }.buttonStyle(QuietButtonStyle(prominent: true)).help("保存小记（⌘↵）；回车换行")
             }.font(NotoDesign.caption).buttonStyle(QuietButtonStyle()).disabled(empty)
         }.padding(16)
             .background(NotoDesign.field, in: RoundedRectangle(cornerRadius: NotoDesign.radius))
@@ -872,19 +913,34 @@ private struct BlankClickObserver: NSViewRepresentable {
 
 struct ConversationView: View {
     @ObservedObject var model: AppModel
+    var compact = false
     private var pending: Bool { model.messages.last?.role == "user" }
     var body: some View {
         VStack(spacing: 0) {
             HStack(alignment: .top) {
-                Text("对话").font(.system(size: 17, weight: .semibold))
+                if compact {
+                    Button { model.readingRequested = true } label: { ActionIcon("arrow.left") }
+                        .buttonStyle(QuietButtonStyle(icon: true)).help("返回记录，保留对话").accessibilityLabel("返回记录")
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("对话").font(.system(size: 17, weight: .semibold))
+                    Text(model.conversation?.text ?? "").font(NotoDesign.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
                 Spacer()
-                Button { model.closeConversation() } label: { ActionIcon("xmark") }
-                    .buttonStyle(QuietButtonStyle(icon: true)).help(model.busy ? "停止回复后可关闭" : "关闭对话（Esc）").accessibilityLabel("关闭对话").disabled(model.busy)
+                if !compact {
+                    Button { model.closeConversation() } label: { ActionIcon("xmark") }
+                        .buttonStyle(QuietButtonStyle(icon: true)).help("关闭对话（Esc）").accessibilityLabel("关闭对话").disabled(model.busy)
+                }
             }.padding(.horizontal, 24).padding(.top, 54).padding(.bottom, 20)
             Divider().padding(.horizontal, 24)
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 28) {
+                        if model.messages.isEmpty {
+                            Text("围绕这条记录继续想一想，或请 AI 帮你整理成任务。")
+                                .font(NotoDesign.body).foregroundStyle(.secondary).lineSpacing(4)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                         ForEach(model.messages) { message in
                             VStack(alignment: .leading, spacing: 10) {
                                 HStack {
@@ -924,6 +980,15 @@ struct ConversationView: View {
                 .onAppear { proxy.scrollTo("chat-bottom", anchor: .bottom) }
             }
             VStack(alignment: .leading, spacing: 10) {
+                Menu {
+                    Toggle("当前记录", isOn: Binding(get: { !model.aiUsesCurrentView }, set: { if $0 { model.aiUsesCurrentView = false } }))
+                    Toggle("当前视图已载入的 \(model.filtered.count) 条内容", isOn: $model.aiUsesCurrentView)
+                } label: {
+                    Label(model.aiContextLabel, systemImage: "doc.text")
+                        .font(NotoDesign.caption).foregroundStyle(.secondary)
+                }.menuStyle(.borderlessButton).fixedSize().disabled(model.busy)
+                    .help("此轮会提供所选记录和本对话历史；当前视图仅包含已载入或筛选的内容。")
+                    .accessibilityLabel("AI 内容范围：\(model.aiContextLabel)")
                 if pending && !model.busy {
                     HStack {
                         Text("问题已保存").font(NotoDesign.caption).foregroundStyle(.secondary)
@@ -989,6 +1054,7 @@ struct DateRail: View {
                             let selected = selectedID == group.id
                             Button { navigate(group.id) } label: {
                                 HStack(spacing: 8) {
+                                    if !expanded { Capsule().fill(selected ? Color.accentColor : Color.secondary.opacity(0.4)).frame(width: selected ? 14 : 8, height: 2) }
                                     Text(expanded ? "\(group.shortLabel)  \(group.label == "今天" || group.label == "昨天" ? group.label : "")" : group.shortLabel)
                                         .font(.system(size: expanded ? 13 : 11, weight: selected ? .medium : .regular)).monospacedDigit()
                                     if expanded { Spacer(minLength: 0) }
@@ -1091,7 +1157,7 @@ struct EntryRow: View {
                 Button("删除任务", role: .destructive) { model.deleteTask(entry) }.disabled(model.busy)
             }
             Button("复制") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(entry.text, forType: .string) }
-            if entry.hasConversation { Button("打开对话") { model.openConversation(entry) }.disabled(model.busy) }
+            Button(entry.hasConversation ? "打开对话" : "与 AI 讨论") { model.openConversation(entry) }.disabled(model.busy)
     }
 }
 
@@ -1293,7 +1359,7 @@ struct InlineEditView: View {
             }
             HStack {
                 Spacer(minLength: 0)
-                Button("取消") { model.cancelEditing() }.buttonStyle(QuietButtonStyle())
+                Button("放弃修改") { model.cancelEditing() }.buttonStyle(QuietButtonStyle())
                 Button("保存") { model.saveEditing() }.buttonStyle(QuietButtonStyle(prominent: true)).help("保存（⌘↵）；回车换行")
                     .disabled(model.editDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }.font(NotoDesign.caption)
@@ -1305,6 +1371,7 @@ struct InlineEditView: View {
 
 struct SettingsView: View {
     @ObservedObject var model: AppModel
+    @State private var showDeleted = false
     var body: some View {
         ScrollView {
         VStack(alignment: .leading, spacing: 24) {
@@ -1316,12 +1383,15 @@ struct SettingsView: View {
                 Text("使用本机已登录的 CLI，下次对话生效。").font(NotoDesign.caption).foregroundStyle(.secondary).lineSpacing(4)
             }
             Divider()
+            Button { showDeleted = true } label: { Label("最近删除", systemImage: "trash") }
+            Divider()
             if let sync = model.sync { SyncSettingsView(model: model, controller: sync) }
             else { Text("预览模式不连接同步服务。").foregroundStyle(.secondary) }
             Divider()
             HStack { Spacer(); Button("完成") { model.settings = false }.keyboardShortcut(.defaultAction).disabled(model.sync?.isSyncing == true) }
         }.padding(28)
         }.buttonStyle(QuietButtonStyle()).frame(width: 540, height: 660)
+            .sheet(isPresented: $showDeleted) { RecentlyDeletedView(model: model) }
             .interactiveDismissDisabled(model.sync?.isSyncing == true)
             .onExitCommand { if model.sync?.isSyncing != true { model.settings = false } }
     }

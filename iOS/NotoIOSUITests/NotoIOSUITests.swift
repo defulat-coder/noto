@@ -6,8 +6,8 @@ final class NotoIOSUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-ui-testing", "-reset-testing"]
         app.launch()
-        XCTAssertTrue(app.buttons["新增待办"].waitForExistence(timeout: 15))
-        app.buttons["新增待办"].tap()
+        XCTAssertTrue(app.buttons["add-todo"].waitForExistence(timeout: 15))
+        app.buttons["add-todo"].tap()
         let editor = app.textViews["待办内容"]
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
         editor.tap()
@@ -27,12 +27,73 @@ final class NotoIOSUITests: XCTestCase {
         app.buttons["保存"].tap()
         XCTAssertTrue(app.buttons[revisedText].waitForExistence(timeout: 5))
         app.buttons["完成待办"].firstMatch.tap()
+        app.buttons["筛选与显示"].tap()
         app.buttons["已完成"].tap()
         let task = app.buttons[revisedText]
         XCTAssertTrue(task.waitForExistence(timeout: 5))
         task.swipeLeft()
         app.buttons["删除"].tap()
-        XCTAssertTrue(app.staticTexts["暂时没有待办"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["没有匹配的待办"].waitForExistence(timeout: 5))
+        app.terminate()
+        app.launchArguments = ["-ui-testing"]
+        app.launch()
+        app.buttons["筛选与显示"].tap()
+        app.buttons["最近删除"].tap()
+        let restore = app.buttons["恢复" + revisedText]
+        XCTAssertTrue(restore.waitForExistence(timeout: 5))
+        restore.tap()
+        XCTAssertTrue(app.staticTexts["没有最近删除的待办"].waitForExistence(timeout: 5))
+        app.buttons["完成"].tap()
+        app.buttons["筛选与显示"].tap()
+        app.buttons["已完成"].tap()
+        XCTAssertTrue(app.buttons[revisedText].waitForExistence(timeout: 5))
+        let restored = XCTAttachment(screenshot: app.screenshot()); restored.name = "iOS restored task"; restored.lifetime = .keepAlways; add(restored)
+    }
+
+    @MainActor func testEditorPreservesDraftAndSupportsStatusAndDate() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-ui-testing", "-reset-testing"]
+        app.launch()
+        XCTAssertTrue(app.buttons["storage-scope"].waitForExistence(timeout: 15))
+        app.buttons["add-todo"].tap()
+        let editor = app.textViews["待办内容"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap(); editor.typeText("Keep this draft")
+        app.buttons["取消"].tap()
+        XCTAssertTrue(app.buttons["继续编辑"].waitForExistence(timeout: 5))
+        app.buttons["继续编辑"].tap()
+        XCTAssertEqual(editor.value as? String, "Keep this draft")
+        app.buttons["todo-status"].tap()
+        app.buttons["进行中"].tap()
+        app.buttons["待办日期"].tap()
+        app.buttons["明天"].tap()
+        let selectedDate = app.buttons["待办日期"].value as? String
+        XCTAssertNotNil(selectedDate)
+        XCTAssertNotEqual(selectedDate, "未设置")
+        app.buttons["保存"].tap()
+        XCTAssertTrue(app.buttons["Keep this draft"].waitForExistence(timeout: 5))
+        app.buttons["Keep this draft"].tap()
+        XCTAssertTrue(app.buttons["todo-status"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["todo-status"].label.contains("进行中") || app.staticTexts["进行中"].exists)
+        XCTAssertEqual(app.buttons["待办日期"].value as? String, selectedDate)
+        let editing = XCTAttachment(screenshot: app.screenshot()); editing.name = "iOS status and date editor"; editing.lifetime = .keepAlways; add(editing)
+        app.buttons["待办日期"].tap()
+        app.buttons["清除日期"].tap()
+        app.buttons["保存"].tap()
+        app.buttons["同步设置"].tap()
+        XCTAssertTrue(app.staticTexts["当前使用本机数据"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.textFields["Supabase URL"].exists)
+        let settings = XCTAttachment(screenshot: app.screenshot()); settings.name = "iOS local account settings"; settings.lifetime = .keepAlways; add(settings)
+        app.buttons["完成"].tap()
+        app.buttons["筛选与显示"].tap()
+        app.buttons["已完成"].tap()
+        app.buttons["add-todo"].tap()
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.tap(); editor.typeText("Visible after creating")
+        app.buttons["保存"].tap()
+        XCTAssertTrue(app.buttons["Visible after creating"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["filter-summary"].label.contains("未完成"))
     }
 }
 
@@ -60,7 +121,7 @@ extension NotoIOSUITests {
         app.launch()
         try await login(app, user: fixture.users[0])
         let title = "iOS live " + UUID().uuidString.lowercased()
-        app.buttons["新增待办"].tap()
+        app.buttons["add-todo"].tap()
         app.textViews["待办内容"].tap()
         app.textViews["待办内容"].typeText(title)
         app.buttons["保存"].tap()
@@ -102,8 +163,7 @@ extension NotoIOSUITests {
 
     @MainActor private func login(_ app: XCUIApplication, user: LiveFixture.User) async throws {
         app.buttons["同步设置"].tap()
-        XCTAssertTrue(app.buttons["保存配置"].waitForExistence(timeout: 5))
-        app.buttons["保存配置"].tap()
+        XCTAssertTrue(app.textFields["邮箱"].waitForExistence(timeout: 5))
         app.textFields["邮箱"].tap(); app.textFields["邮箱"].typeText(user.email)
         app.secureTextFields["密码"].tap(); app.secureTextFields["密码"].typeText(user.password)
         app.buttons["登录"].tap()

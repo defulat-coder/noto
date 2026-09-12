@@ -126,6 +126,10 @@ public final class Store: @unchecked Sendable {
         }
     }
 
+    public func entry(id: String) throws -> Entry? {
+        try db.read { try Entry.fetchOne($0, key: id) }
+    }
+
     public struct Backup: Encodable {
         public let entries: [Entry]
         public let conversations: [String: [ChatMessage]]
@@ -218,7 +222,11 @@ public final class Store: @unchecked Sendable {
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, text.count <= 50_000 else { throw NotoError("问题不能为空，且不能超过 50,000 字。") }
         try db.write { db in
-            guard try Entry.fetchOne(db, key: entryID)?.hasConversation == true else { throw NotoError("对话不存在。") }
+            guard var entry = try Entry.fetchOne(db, key: entryID) else { throw NotoError("记录不存在。") }
+            if !entry.hasConversation {
+                entry.hasConversation = true
+                try entry.update(db)
+            }
             try ChatMessage(entryID: entryID, role: "user", text: text).insert(db)
         }
     }

@@ -3,6 +3,37 @@ import GRDB
 @testable import NotoCore
 
 final class StoreTests: XCTestCase {
+    func testFirstQuestionStartsConversationOnExistingNotesAndTasks() throws {
+        for kind in ["note", "todo"] {
+            let store = try Store(url: nil)
+            let original = try store.add(kind: kind, text: "原来的正文", due: kind == "todo" ? "2026-09-12" : nil,
+                                         status: kind == "todo" ? "in_progress" : nil, priority: kind == "todo" ? "important" : nil)
+            try store.appendQuestion("  帮我整理这条记录  ", to: original.id)
+            var expected = original; expected.hasConversation = true
+            XCTAssertEqual(try store.list(), [expected])
+            XCTAssertEqual(try store.entry(id: original.id), expected)
+            let question = try XCTUnwrap(store.messages(for: original.id).first)
+            XCTAssertEqual(question.text, "帮我整理这条记录")
+            XCTAssertEqual(question.role, "user")
+            XCTAssertEqual(question.entryID, original.id)
+            _ = try store.apply([], replyingTo: question, reply: "第一条回复")
+            try store.appendQuestion("继续讨论", to: original.id)
+            XCTAssertEqual(try store.messages(for: original.id).map(\.role), ["user", "assistant", "user"])
+            XCTAssertEqual(try store.list(), [expected])
+        }
+    }
+
+    func testInvalidFirstQuestionDoesNotCreateConversationOrChangeRecord() throws {
+        let store = try Store(url: nil)
+        let original = try store.add(kind: "note", text: "保留的正文")
+        XCTAssertThrowsError(try store.appendQuestion("问题", to: "missing"))
+        XCTAssertThrowsError(try store.appendQuestion(" \n ", to: original.id))
+        XCTAssertEqual(try store.list(), [original])
+        XCTAssertTrue(try store.messages(for: original.id).isEmpty)
+        XCTAssertTrue(try store.messages(for: "missing").isEmpty)
+        XCTAssertNil(try store.entry(id: "missing"))
+    }
+
     func testConversationPersistsSearchesAndCommitsAtomically() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".sqlite")
         defer { try? FileManager.default.removeItem(at: url) }

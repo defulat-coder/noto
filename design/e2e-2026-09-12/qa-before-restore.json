@@ -1,0 +1,61 @@
+{
+  "conversations" : {
+
+  },
+  "entries" : [
+    {
+      "completed" : true,
+      "completedAt" : "2026-09-12T08:20:51Z",
+      "createdAt" : "2026-09-12T08:20:51Z",
+      "hasConversation" : false,
+      "id" : "50168bf1-75f4-40e8-afc4-5b2b0eb316e1",
+      "kind" : "todo",
+      "priority" : "normal",
+      "status" : "completed",
+      "text" : "把灵感收进一个地方",
+      "updatedAt" : "2026-09-12T08:20:51Z"
+    },
+    {
+      "completed" : false,
+      "createdAt" : "2026-09-12T08:20:51Z",
+      "due" : "2026-09-13",
+      "hasConversation" : false,
+      "id" : "3c9099ef-f44b-4a4c-916f-b910aa423f84",
+      "kind" : "todo",
+      "priority" : "normal",
+      "status" : "pending",
+      "text" : "读完收藏的设计文章",
+      "updatedAt" : "2026-09-12T08:20:51Z"
+    },
+    {
+      "completed" : false,
+      "createdAt" : "2026-09-12T08:20:51Z",
+      "due" : "2026-09-12",
+      "hasConversation" : false,
+      "id" : "916ce8c9-252e-4fb4-914a-0059925a8cee",
+      "kind" : "todo",
+      "priority" : "important",
+      "status" : "in_progress",
+      "text" : "整理下一版的交互草图",
+      "updatedAt" : "2026-09-12T08:20:51Z"
+    },
+    {
+      "completed" : false,
+      "createdAt" : "2026-09-12T08:20:51Z",
+      "hasConversation" : false,
+      "id" : "e025b82e-33bb-4f0c-a28a-bf8483260e89",
+      "kind" : "note",
+      "text" : "周末留一点时间，回看这一周的想法。",
+      "updatedAt" : "2026-09-12T08:20:51Z"
+    },
+    {
+      "completed" : false,
+      "createdAt" : "2026-09-12T08:20:51Z",
+      "hasConversation" : false,
+      "id" : "76e29c00-b26a-4688-9a89-8730d8a21e4a",
+      "kind" : "note",
+      "text" : "好工具应该让人先记下来，再慢慢理清楚。",
+      "updatedAt" : "2026-09-12T08:20:51Z"
+    }
+  ]
+}

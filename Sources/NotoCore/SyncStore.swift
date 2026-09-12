@@ -118,6 +118,23 @@ extension Store {
         try db.read { try SyncConflict.fetchAll($0, sql: "SELECT * FROM noto_conflicts ORDER BY id") }
     }
 
+    /// The archive has no deletion timestamp; newest archive insertions appear first.
+    public func deletedTodos() throws -> [Entry] {
+        try db.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT document, messages FROM noto_deleted_entries
+                WHERE NOT EXISTS (SELECT 1 FROM entries WHERE entries.id = noto_deleted_entries.id)
+                ORDER BY rowid DESC
+                """).map { row in
+                    var entry = try Self.decodeSyncEntry(row["document"])
+                    let messages: Data? = row["messages"]
+                    let history = try messages.map { try JSONDecoder().decode([ChatMessage].self, from: $0) } ?? []
+                    entry.hasConversation = !history.isEmpty
+                    return entry
+                }
+        }
+    }
+
     public func deleteTodo(id: String, expected: Entry? = nil) throws {
         try db.write { db in
             guard let entry = try Entry.fetchOne(db, key: id), entry.kind == "todo" else { throw NotoError("任务不存在。") }

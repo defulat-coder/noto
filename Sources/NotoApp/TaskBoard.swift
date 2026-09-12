@@ -49,6 +49,8 @@ extension AppModel {
                                       due: taskDraftHasDue ? Self.dateKey(taskDraftDate) : nil,
                                       status: taskDraftStatus, priority: taskDraftImportant ? "important" : "normal")
             taskCreating = false; taskDraftStarted = false; taskDraft = ""; taskDraftHasDue = false; taskDraftImportant = false
+            if !search.isEmpty { search = "" }
+            if importantOnly && entry.priority != "important" { importantOnly = false }
             remember(before: [], after: [entry], message: "已添加任务。")
             highlightedTaskID = entry.id
             if mode == .calendar {
@@ -107,6 +109,11 @@ struct TaskBoard: View {
                     if !model.search.isEmpty || model.importantOnly {
                         Button("清除筛选") { model.setSearch(""); model.setImportantOnly(false) }
                     }
+                }.font(NotoDesign.caption).foregroundStyle(.secondary)
+            } else if model.importantOnly || !model.search.isEmpty {
+                HStack {
+                    Text(model.importantOnly ? "重要 · \(model.visibleTasks.count) 项" : "\(model.visibleTasks.count) 项匹配任务")
+                    Button("清除筛选") { model.setSearch(""); model.setImportantOnly(false) }.buttonStyle(QuietButtonStyle())
                 }.font(NotoDesign.caption).foregroundStyle(.secondary)
             }
             GeometryReader { geometry in
@@ -194,6 +201,7 @@ struct TaskCard: View {
                 }
                 Menu {
                     Button("编辑任务") { model.beginEditing(entry) }
+                    Button(entry.hasConversation ? "打开对话" : "与 AI 讨论") { model.openConversation(entry) }.disabled(model.busy)
                     ForEach(TodoStatus.allCases, id: \.self) { status in
                         Button { model.changeTask(entry, status: status.rawValue) } label: {
                             if entry.status == status.rawValue { Label(status.label, systemImage: "checkmark") }
@@ -253,7 +261,7 @@ struct TaskEditor: View {
             }
             HStack {
                 Spacer()
-                Button("取消", action: cancel).buttonStyle(QuietButtonStyle())
+                Button(creating ? "收起" : "放弃修改", action: cancel).buttonStyle(QuietButtonStyle())
                 Button("保存", action: save).buttonStyle(QuietButtonStyle(prominent: true)).help("保存（⌘↵）；回车换行")
                     .disabled(text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }

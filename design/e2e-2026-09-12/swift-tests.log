@@ -1,0 +1,153 @@
+[1/1] Compiling plugin GenerateManual
+[2/2] Compiling plugin GenerateDoccReference
+Building for debugging...
+[2/9] Write sources
+[3/9] Write swift-version--58304C5D6DBC2206.txt
+[5/8] Compiling NotoAppTests InteractionTests.swift
+[6/8] Emitting module NotoAppTests
+[6/8] Write Objects.LinkFileList
+[7/8] Linking NotoPackageTests
+Build complete! (1.81s)
+Test Suite 'All tests' started at 2026-09-12 16:26:54.068.
+Test Suite 'NotoPackageTests.xctest' started at 2026-09-12 16:26:54.069.
+Test Suite 'CalendarTests' started at 2026-09-12 16:26:54.069.
+Test Case '-[NotoAppTests.CalendarTests testCalendarGroupingIncludesAllCompletedAndUnscheduled]' started.
+Test Case '-[NotoAppTests.CalendarTests testCalendarGroupingIncludesAllCompletedAndUnscheduled]' passed (0.232 seconds).
+Test Case '-[NotoAppTests.CalendarTests testConversationSearchAndImportanceUseTheSameCalendarGroups]' started.
+Test Case '-[NotoAppTests.CalendarTests testConversationSearchAndImportanceUseTheSameCalendarGroups]' passed (0.229 seconds).
+Test Case '-[NotoAppTests.CalendarTests testCreationDateDefaultsDraftRetentionAndModeGuard]' started.
+Test Case '-[NotoAppTests.CalendarTests testCreationDateDefaultsDraftRetentionAndModeGuard]' passed (0.010 seconds).
+Test Case '-[NotoAppTests.CalendarTests testMonthGridLeapYearAndLocalDateArithmetic]' started.
+Test Case '-[NotoAppTests.CalendarTests testMonthGridLeapYearAndLocalDateArithmetic]' passed (0.000 seconds).
+Test Case '-[NotoAppTests.CalendarTests testPrivateDragTypeRejectsOrdinaryTextAndKeepsSnapshot]' started.
+Test Case '-[NotoAppTests.CalendarTests testPrivateDragTypeRejectsOrdinaryTextAndKeepsSnapshot]' passed (0.005 seconds).
+Test Case '-[NotoAppTests.CalendarTests testReschedulePreservesStatusAndSupportsUndoAndConflict]' started.
+Test Case '-[NotoAppTests.CalendarTests testReschedulePreservesStatusAndSupportsUndoAndConflict]' passed (0.022 seconds).
+Test Suite 'CalendarTests' passed at 2026-09-12 16:26:54.569.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.499 (0.500) seconds
+Test Suite 'ConfigurationTests' started at 2026-09-12 16:26:54.569.
+Test Case '-[NotoSyncTests.ConfigurationTests testRemoteServicesRequireHTTPSAndClientSafeKeys]' started.
+Test Case '-[NotoSyncTests.ConfigurationTests testRemoteServicesRequireHTTPSAndClientSafeKeys]' passed (0.000 seconds).
+Test Suite 'ConfigurationTests' passed at 2026-09-12 16:26:54.569.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'InteractionTests' started at 2026-09-12 16:26:54.569.
+Test Case '-[NotoAppTests.InteractionTests testBoardCreationFiltersConversionAndDirtyProtection]' started.
+Test Case '-[NotoAppTests.InteractionTests testBoardCreationFiltersConversionAndDirtyProtection]' passed (0.011 seconds).
+Test Case '-[NotoAppTests.InteractionTests testBoardExternalRefreshDragConflictAndCompletedLimit]' started.
+Test Case '-[NotoAppTests.InteractionTests testBoardExternalRefreshDragConflictAndCompletedLimit]' passed (0.033 seconds).
+Test Case '-[NotoAppTests.InteractionTests testDiscussionUsesExplicitRecordContextWithoutDuplicatingTheNote]' started.
+Test Case '-[NotoAppTests.InteractionTests testDiscussionUsesExplicitRecordContextWithoutDuplicatingTheNote]' passed (0.012 seconds).
+Test Case '-[NotoAppTests.InteractionTests testDraftMovementAndDirtyEditProtection]' started.
+Test Case '-[NotoAppTests.InteractionTests testDraftMovementAndDirtyEditProtection]' passed (0.007 seconds).
+Test Case '-[NotoAppTests.InteractionTests testEmptyEditAndTodoMetadata]' started.
+Test Case '-[NotoAppTests.InteractionTests testEmptyEditAndTodoMetadata]' passed (0.008 seconds).
+Test Case '-[NotoAppTests.InteractionTests testInlineEditPreservesConversationAndRejectsConcurrentChange]' started.
+Test Case '-[NotoAppTests.InteractionTests testInlineEditPreservesConversationAndRejectsConcurrentChange]' passed (0.011 seconds).
+Test Case '-[NotoAppTests.InteractionTests testMarkedTextCannotSubmit]' started.
+Test Case '-[NotoAppTests.InteractionTests testMarkedTextCannotSubmit]' passed (0.171 seconds).
+Test Case '-[NotoAppTests.InteractionTests testNewContentIsVisibleAfterSavingFromSearchAndImportantFilter]' started.
+Test Case '-[NotoAppTests.InteractionTests testNewContentIsVisibleAfterSavingFromSearchAndImportantFilter]' passed (0.007 seconds).
+Test Case '-[NotoAppTests.InteractionTests testNoteSubmissionSavesLocallyWhileAIIsBusy]' started.
+Test Case '-[NotoAppTests.InteractionTests testNoteSubmissionSavesLocallyWhileAIIsBusy]' passed (0.006 seconds).
+Test Suite 'InteractionTests' passed at 2026-09-12 16:26:54.836.
+	 Executed 9 tests, with 0 failures (0 unexpected) in 0.266 (0.267) seconds
+Test Suite 'LiveSyncTests' started at 2026-09-12 16:26:54.836.
+Test Case '-[NotoSyncTests.LiveSyncTests testRealSwiftOfflineReplicationConflictsAndIsolation]' started.
+/Users/xbjt/Documents/myself/noto/Tests/NotoSyncTests/LiveSyncTests.swift:20: -[NotoSyncTests.LiveSyncTests testRealSwiftOfflineReplicationConflictsAndIsolation] : Test skipped - Set NOTO_LIVE_FIXTURE to test against disposable live services
+Test Case '-[NotoSyncTests.LiveSyncTests testRealSwiftOfflineReplicationConflictsAndIsolation]' skipped (0.001 seconds).
+Test Suite 'LiveSyncTests' passed at 2026-09-12 16:26:54.837.
+	 Executed 1 test, with 1 test skipped and 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'PerformanceTests' started at 2026-09-12 16:26:54.837.
+Test Case '-[NotoAppTests.PerformanceTests testDerivedViewsInvalidateOnlyWhenTheirInputsChange]' started.
+Test Case '-[NotoAppTests.PerformanceTests testDerivedViewsInvalidateOnlyWhenTheirInputsChange]' passed (0.005 seconds).
+Test Case '-[NotoAppTests.PerformanceTests testLargeCalendarAndTimelineReadCost]' started.
+Test Case '-[NotoAppTests.PerformanceTests testLargeCalendarAndTimelineReadCost]' passed (0.078 seconds).
+Test Case '-[NotoAppTests.PerformanceTests testLatestSearchWinsAndOldPaginationCannotAppend]' started.
+Test Case '-[NotoAppTests.PerformanceTests testLatestSearchWinsAndOldPaginationCannotAppend]' passed (0.229 seconds).
+Test Suite 'PerformanceTests' passed at 2026-09-12 16:26:55.149.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.313 (0.313) seconds
+Test Suite 'StoreTests' started at 2026-09-12 16:26:55.149.
+Test Case '-[NotoCoreTests.StoreTests testAgentCancellationStopsCLIThatIgnoresTerminate]' started.
+Test Case '-[NotoCoreTests.StoreTests testAgentCancellationStopsCLIThatIgnoresTerminate]' passed (1.488 seconds).
+Test Case '-[NotoCoreTests.StoreTests testAtomicActionsIdempotencyAndUndoConflict]' started.
+Test Case '-[NotoCoreTests.StoreTests testAtomicActionsIdempotencyAndUndoConflict]' passed (0.011 seconds).
+Test Case '-[NotoCoreTests.StoreTests testConversationPersistsSearchesAndCommitsAtomically]' started.
+Test Case '-[NotoCoreTests.StoreTests testConversationPersistsSearchesAndCommitsAtomically]' passed (0.015 seconds).
+Test Case '-[NotoCoreTests.StoreTests testDesktopLockWaitIsBoundedAndDoesNotLoseData]' started.
+Test Case '-[NotoCoreTests.StoreTests testDesktopLockWaitIsBoundedAndDoesNotLoseData]' passed (0.127 seconds).
+Test Case '-[NotoCoreTests.StoreTests testFilteredNotesAtomicUpdateAndSnapshotBackup]' started.
+Test Case '-[NotoCoreTests.StoreTests testFilteredNotesAtomicUpdateAndSnapshotBackup]' passed (0.010 seconds).
+Test Case '-[NotoCoreTests.StoreTests testFirstQuestionStartsConversationOnExistingNotesAndTasks]' started.
+Test Case '-[NotoCoreTests.StoreTests testFirstQuestionStartsConversationOnExistingNotesAndTasks]' passed (0.014 seconds).
+Test Case '-[NotoCoreTests.StoreTests testHistoryPaginationDoesNotSkipOrRepeatAfterNewInsertion]' started.
+Test Case '-[NotoCoreTests.StoreTests testHistoryPaginationDoesNotSkipOrRepeatAfterNewInsertion]' passed (0.028 seconds).
+Test Case '-[NotoCoreTests.StoreTests testInvalidFirstQuestionDoesNotCreateConversationOrChangeRecord]' started.
+Test Case '-[NotoCoreTests.StoreTests testInvalidFirstQuestionDoesNotCreateConversationOrChangeRecord]' passed (0.006 seconds).
+Test Case '-[NotoCoreTests.StoreTests testPooledReadersKeepExternalChangeDetectionStable]' started.
+Test Case '-[NotoCoreTests.StoreTests testPooledReadersKeepExternalChangeDetectionStable]' passed (0.014 seconds).
+Test Case '-[NotoCoreTests.StoreTests testSharedDatabaseAndAgentParsing]' started.
+Test Case '-[NotoCoreTests.StoreTests testSharedDatabaseAndAgentParsing]' passed (0.011 seconds).
+Test Suite 'StoreTests' passed at 2026-09-12 16:26:56.873.
+	 Executed 10 tests, with 0 failures (0 unexpected) in 1.723 (1.724) seconds
+Test Suite 'SyncInteractionTests' started at 2026-09-12 16:26:56.873.
+Test Case '-[NotoAppTests.SyncInteractionTests testAccountReplacementClearsOldContentUndoAndSelection]' started.
+Test Case '-[NotoAppTests.SyncInteractionTests testAccountReplacementClearsOldContentUndoAndSelection]' passed (0.012 seconds).
+Test Case '-[NotoAppTests.SyncInteractionTests testAccountSwitchRefusesUnsentAndHiddenDrafts]' started.
+Test Case '-[NotoAppTests.SyncInteractionTests testAccountSwitchRefusesUnsentAndHiddenDrafts]' passed (0.005 seconds).
+Test Case '-[NotoAppTests.SyncInteractionTests testTaskDeletionAndRestoreRefreshTheBoardWithoutRemovingOtherTasks]' started.
+Test Case '-[NotoAppTests.SyncInteractionTests testTaskDeletionAndRestoreRefreshTheBoardWithoutRemovingOtherTasks]' passed (0.009 seconds).
+Test Suite 'SyncInteractionTests' passed at 2026-09-12 16:26:56.899.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.026 (0.026) seconds
+Test Suite 'SyncStoreTests' started at 2026-09-12 16:26:56.899.
+Test Case '-[NotoCoreTests.SyncStoreTests testAcknowledgementEstablishesARevisionFloorAndDoesNotEchoDownloads]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testAcknowledgementEstablishesARevisionFloorAndDoesNotEchoDownloads]' passed (0.010 seconds).
+Test Case '-[NotoCoreTests.SyncStoreTests testAnAccountCannotClaimAnotherAccountsDatabase]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testAnAccountCannotClaimAnotherAccountsDatabase]' passed (0.005 seconds).
+Test Case '-[NotoCoreTests.SyncStoreTests testConflictsPreserveLocalTextAndRecoveryIsIdempotent]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testConflictsPreserveLocalTextAndRecoveryIsIdempotent]' passed (0.010 seconds).
+Test Case '-[NotoCoreTests.SyncStoreTests testDeleteAndRestorePreserveExistingConversationHistory]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testDeleteAndRestorePreserveExistingConversationHistory]' passed (0.013 seconds).
+Test Case '-[NotoCoreTests.SyncStoreTests testDeletedTasksSurviveReopeningAndRestoreTheirContentAndConversation]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testDeletedTasksSurviveReopeningAndRestoreTheirContentAndConversation]' passed (0.024 seconds).
+Test Case '-[NotoCoreTests.SyncStoreTests testDeletionRejectsStaleResurrectionAndExplicitRestoreQueuesRestore]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testDeletionRejectsStaleResurrectionAndExplicitRestoreQueuesRestore]' passed (0.008 seconds).
+Test Case '-[NotoCoreTests.SyncStoreTests testExplicitReconversionAfterUndoUsesRestoreInsteadOfRejectedUpsert]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testExplicitReconversionAfterUndoUsesRestoreInsteadOfRejectedUpsert]' passed (0.015 seconds).
+Test Case '-[NotoCoreTests.SyncStoreTests testImportingTheSameLocalTaskIntoTwoAccountsUsesSeparateCloudIDs]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testImportingTheSameLocalTaskIntoTwoAccountsUsesSeparateCloudIDs]' passed (0.016 seconds).
+Test Case '-[NotoCoreTests.SyncStoreTests testImportIsIdempotentAndDoesNotResurrectPendingLocalDeletion]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testImportIsIdempotentAndDoesNotResurrectPendingLocalDeletion]' passed (0.012 seconds).
+Test Case '-[NotoCoreTests.SyncStoreTests testMalformedAcknowledgementRollsBackQueueRemoval]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testMalformedAcknowledgementRollsBackQueueRemoval]' passed (0.006 seconds).
+Test Case '-[NotoCoreTests.SyncStoreTests testOutboxSharesTheBusinessTransactionAndIgnoresNotesAndNoOpEdits]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testOutboxSharesTheBusinessTransactionAndIgnoresNotesAndNoOpEdits]' passed (0.008 seconds).
+Test Case '-[NotoCoreTests.SyncStoreTests testPendingLocalEditsSurviveDownloadsAndEarlierAcknowledgements]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testPendingLocalEditsSurviveDownloadsAndEarlierAcknowledgements]' passed (0.009 seconds).
+Test Case '-[NotoCoreTests.SyncStoreTests testQueueSurvivesReopeningAndCapturesAnIndependentCLIConnection]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testQueueSurvivesReopeningAndCapturesAnIndependentCLIConnection]' passed (0.017 seconds).
+Test Case '-[NotoCoreTests.SyncStoreTests testRemoteRestoreHidesArchiveAndRepeatedDeletionBecomesMostRecent]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testRemoteRestoreHidesArchiveAndRepeatedDeletionBecomesMostRecent]' passed (0.016 seconds).
+Test Case '-[NotoCoreTests.SyncStoreTests testUndoingConversionRemovesTheSyncedTodoButPreservesTheLocalNote]' started.
+Test Case '-[NotoCoreTests.SyncStoreTests testUndoingConversionRemovesTheSyncedTodoButPreservesTheLocalNote]' passed (0.008 seconds).
+Test Suite 'SyncStoreTests' passed at 2026-09-12 16:26:57.076.
+	 Executed 15 tests, with 0 failures (0 unexpected) in 0.176 (0.177) seconds
+Test Suite 'TaskTests' started at 2026-09-12 16:26:57.076.
+Test Case '-[NotoCoreTests.TaskTests testConversionAIAtomicityAndUndo]' started.
+Test Case '-[NotoCoreTests.TaskTests testConversionAIAtomicityAndUndo]' passed (0.010 seconds).
+Test Case '-[NotoCoreTests.TaskTests testMigrationFromV4]' started.
+Test Case '-[NotoCoreTests.TaskTests testMigrationFromV4]' passed (0.010 seconds).
+Test Case '-[NotoCoreTests.TaskTests testQueryBeyondTimelineAndOrderAndIdempotency]' started.
+Test Case '-[NotoCoreTests.TaskTests testQueryBeyondTimelineAndOrderAndIdempotency]' passed (0.016 seconds).
+Test Case '-[NotoCoreTests.TaskTests testTransitionsPreserveCompletionTimeAndPartialFields]' started.
+Test Case '-[NotoCoreTests.TaskTests testTransitionsPreserveCompletionTimeAndPartialFields]' passed (0.009 seconds).
+Test Suite 'TaskTests' passed at 2026-09-12 16:26:57.122.
+	 Executed 4 tests, with 0 failures (0 unexpected) in 0.045 (0.045) seconds
+Test Suite 'NotoPackageTests.xctest' passed at 2026-09-12 16:26:57.122.
+	 Executed 52 tests, with 1 test skipped and 0 failures (0 unexpected) in 3.048 (3.053) seconds
+Test Suite 'All tests' passed at 2026-09-12 16:26:57.122.
+	 Executed 52 tests, with 1 test skipped and 0 failures (0 unexpected) in 3.048 (3.054) seconds
+PERF derived views 10k tasks / 2k timeline, 20 reads: 67.64101982116699 ms
+◇ Test run started.
+↳ Testing Library Version: 1501
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

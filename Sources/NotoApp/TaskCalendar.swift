@@ -6,7 +6,7 @@ enum ContentMode: String, CaseIterable, Identifiable {
     case notes, board = "tasks", calendar
     var id: String { rawValue }
     var isTaskView: Bool { self != .notes }
-    var label: String { switch self { case .notes: "笔记"; case .board: "看板"; case .calendar: "日历" } }
+    var label: String { switch self { case .notes: "记录"; case .board: "看板"; case .calendar: "日历" } }
     var icon: String { switch self { case .notes: "text.alignleft"; case .board: "rectangle.split.3x1"; case .calendar: "calendar" } }
     var shortcut: KeyEquivalent { switch self { case .notes: "1"; case .board: "2"; case .calendar: "3" } }
 }
@@ -263,6 +263,7 @@ private struct CalendarTaskRow: View {
             }
             Menu {
                 Button("编辑任务") { model.beginEditing(entry) }
+                Button(entry.hasConversation ? "打开对话" : "与 AI 讨论") { model.openConversation(entry) }.disabled(model.busy)
                 ForEach(TodoStatus.allCases, id: \.self) { status in
                     Button(status.label) { model.changeTask(entry, status: status.rawValue) }
                 }

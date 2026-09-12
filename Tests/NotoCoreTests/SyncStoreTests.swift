@@ -222,6 +222,74 @@ final class SyncStoreTests: XCTestCase {
         XCTAssertEqual(try store.messages(for: note.id).map(\.text), messages.map(\.text))
     }
 
+    func testDeletedTasksSurviveReopeningAndRestoreTheirContentAndConversation() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("deleted.sqlite")
+        let firstID: String, secondID: String
+        let history: [ChatMessage]
+        do {
+            let store = try Store(url: url)
+            try store.enableSync(accountID: account)
+            let note = try store.startConversation("保留原来的问题")
+            let question = try XCTUnwrap(store.messages(for: note.id).last)
+            _ = try store.apply([], replyingTo: question, reply: "保留完整回复")
+            _ = try store.convertToTodo(id: note.id)
+            let first = try store.updateTodo(id: note.id, text: "修改后的任务正文", due: "2026-09-12", status: "in_progress", priority: "important")
+            let second = try store.add(kind: "todo", text: "第二个任务")
+            firstID = first.id; secondID = second.id
+            history = try store.messages(for: first.id)
+            try store.deleteTodo(id: first.id)
+            try store.deleteTodo(id: second.id)
+            XCTAssertEqual(try store.deletedTodos().map(\.id), [second.id, first.id])
+        }
+
+        let reopened = try Store(url: url)
+        let deleted = try reopened.deletedTodos()
+        XCTAssertEqual(deleted.map(\.id), [secondID, firstID])
+        XCTAssertEqual(deleted.last?.text, "修改后的任务正文")
+        XCTAssertEqual(deleted.last?.due, "2026-09-12")
+        XCTAssertEqual(deleted.last?.status, "in_progress")
+        XCTAssertEqual(deleted.last?.priority, "important")
+        XCTAssertTrue(try XCTUnwrap(deleted.last).hasConversation)
+        XCTAssertFalse(try XCTUnwrap(deleted.first).hasConversation)
+        XCTAssertTrue(try reopened.messages(for: firstID).isEmpty)
+
+        try reopened.restoreTodo(id: firstID)
+        XCTAssertEqual(try reopened.deletedTodos().map(\.id), [secondID])
+        let restored = try XCTUnwrap(reopened.todos().first)
+        var archived = try XCTUnwrap(deleted.last)
+        // Sync JSON and GRDB both persist milliseconds; Date conversion can differ below that precision.
+        XCTAssertEqual(restored.createdAt.timeIntervalSince1970, archived.createdAt.timeIntervalSince1970, accuracy: 0.001)
+        XCTAssertEqual(restored.updatedAt.timeIntervalSince1970, archived.updatedAt.timeIntervalSince1970, accuracy: 0.001)
+        archived.createdAt = restored.createdAt; archived.updatedAt = restored.updatedAt
+        XCTAssertEqual(restored, archived)
+        XCTAssertEqual(try reopened.messages(for: firstID), history)
+        XCTAssertEqual(try reopened.pendingMutations().last?.operation, "restore")
+        XCTAssertThrowsError(try reopened.restoreTodo(id: firstID))
+
+        let otherAccount = try Store(url: nil)
+        try otherAccount.enableSync(accountID: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+        XCTAssertTrue(try otherAccount.deletedTodos().isEmpty)
+    }
+
+    func testRemoteRestoreHidesArchiveAndRepeatedDeletionBecomesMostRecent() throws {
+        let store = try syncedStore()
+        let first = Entry(kind: "todo", text: "先删除的任务")
+        let second = Entry(kind: "todo", text: "后删除的任务")
+        for task in [first, second] {
+            try store.applyRemoteTask(id: task.id, document: document(task), revision: 1, deleted: false)
+            try store.applyRemoteTask(id: task.id, document: document(task), revision: 2, deleted: true)
+        }
+        XCTAssertEqual(try store.deletedTodos().map(\.id), [second.id, first.id])
+        try store.applyRemoteTask(id: first.id, document: document(first), revision: 3, deleted: false)
+        XCTAssertEqual(try store.deletedTodos().map(\.id), [second.id])
+        XCTAssertThrowsError(try store.restoreTodo(id: first.id))
+        try store.applyRemoteTask(id: first.id, document: document(first), revision: 4, deleted: true)
+        XCTAssertEqual(try store.deletedTodos().map(\.id), [first.id, second.id])
+        XCTAssertEqual(try store.pendingMutationCount(), 0)
+    }
+
     func testUndoingConversionRemovesTheSyncedTodoButPreservesTheLocalNote() throws {
         let store = try syncedStore()
         let note = try store.add(kind: "note", text: "Note to task and back")
