@@ -56,6 +56,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 PLIST
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$APP/Contents/Info.plist"
+cp THIRD-PARTY-NOTICES/codenotch.txt "$APP/Contents/Resources/Codenotch-LICENSE.txt"
 cp .build/checkouts/GRDB.swift/LICENSE "$APP/Contents/Resources/GRDB-LICENSE.txt"
 cp .build/checkouts/swift-argument-parser/LICENSE.txt "$APP/Contents/Resources/ArgumentParser-LICENSE.txt"
 cp .build/checkouts/powersync-swift/LICENSE "$APP/Contents/Resources/PowerSync-LICENSE.txt"

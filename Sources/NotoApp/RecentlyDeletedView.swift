@@ -19,7 +19,7 @@ struct RecentlyDeletedView: View {
                 Spacer()
                 Button("完成") { dismiss() }.keyboardShortcut(.cancelAction)
             }
-            Divider()
+            Color.clear.frame(height: 4)
             if loading { ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity) }
             else if entries.isEmpty {
                 Text("没有已删除的任务").font(NotoDesign.body).foregroundStyle(.secondary)
@@ -38,16 +38,16 @@ struct RecentlyDeletedView: View {
                                 }.frame(maxWidth: .infinity, alignment: .leading)
                                 Button("恢复") { restore(entry) }.disabled(model.busy)
                                     .accessibilityLabel("恢复：\(entry.text)")
-                            }.padding(.vertical, 14)
-                            Divider()
+                            }.padding(.vertical, 14).transition(.opacity)
+                            Color.clear.frame(height: 4)
                         }
-                    }
+                    }.animation(NotoMotion.animation(.layout), value: entries.map(\.id))
                 }
             }
             if !error.isEmpty {
                 Label(error, systemImage: "exclamationmark.circle").font(NotoDesign.caption).foregroundStyle(.red)
             }
-        }.padding(24).frame(width: 490, height: 470).buttonStyle(QuietButtonStyle())
+        }.padding(24).background(NotoGlassSurface(radius: 20)).frame(width: 490, height: 470).buttonStyle(QuietButtonStyle())
             .task(id: model.store.map(ObjectIdentifier.init)) { await reload() }
     }
     @MainActor private func reload() async {

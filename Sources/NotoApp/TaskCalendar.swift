@@ -11,23 +11,7 @@ enum ContentMode: String, CaseIterable, Identifiable {
     var shortcut: KeyEquivalent { switch self { case .notes: "1"; case .board: "2"; case .calendar: "3" } }
 }
 
-struct ViewModeMenu: View {
-    @ObservedObject var model: AppModel
-    var body: some View {
-        Menu {
-            ForEach(ContentMode.allCases) { mode in
-                Toggle(isOn: Binding(get: { model.mode == mode }, set: { if $0 { model.switchMode(mode) } })) {
-                    Label(mode.label, systemImage: mode.icon)
-                }.keyboardShortcut(mode.shortcut, modifiers: .command)
-            }
-        } label: { ActionIcon(model.mode.icon).contentShape(Rectangle()) }
-            .actionMenuStyle()
-            .help("当前：\(model.mode.label) · 切换视图（⌘1 / ⌘2 / ⌘3）")
-            .accessibilityLabel("切换视图，当前\(model.mode.label)")
-    }
-}
-
-struct TaskToolbarActions: View {
+struct ImportantTaskFilter: View {
     @ObservedObject var model: AppModel
     var body: some View {
         HStack(spacing: 8) {
@@ -37,8 +21,6 @@ struct TaskToolbarActions: View {
                     .background(model.importantOnly ? Color.accentColor.opacity(0.08) : .clear, in: RoundedRectangle(cornerRadius: 6))
             }.buttonStyle(QuietButtonStyle(icon: true)).help(model.importantOnly ? "显示全部任务" : "只看重要任务")
                 .accessibilityLabel("只看重要任务").accessibilityValue(model.importantOnly ? "已开启" : "已关闭")
-            Button { model.showNewTask() } label: { ActionIcon("plus") }
-                .buttonStyle(QuietButtonStyle(icon: true)).help("新建任务（⌘N）").accessibilityLabel("新建任务")
         }
     }
 }
@@ -119,6 +101,7 @@ struct TaskCalendar: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 4) {
                     Text(searching ? "搜索任务" : monthLabel).font(.system(size: 18, weight: .semibold))
+                        .contentTransition(.opacity).animation(NotoMotion.animation(.navigation), value: monthLabel)
                     if !searching {
                         iconButton("chevron.left", "上个月") { model.moveCalendarMonth(-1) }
                         iconButton("chevron.right", "下个月") { model.moveCalendarMonth(1) }
@@ -132,7 +115,6 @@ struct TaskCalendar: View {
                                 .background(model.calendarUnscheduled && !searching ? Color.primary.opacity(0.06) : .clear, in: RoundedRectangle(cornerRadius: 6))
                         }.buttonStyle(QuietButtonStyle(icon: true)).help("未安排 · 拖入任务可清除日期")
                     }.frame(width: 92, height: 28)
-                    TaskToolbarActions(model: model)
                 }
                 if searching || model.importantOnly {
                     HStack {
@@ -141,21 +123,25 @@ struct TaskCalendar: View {
                     }.font(NotoDesign.caption)
                 }
                 if searching {
-                    taskDetails
+                    animatedDetails
                 } else if geometry.size.width >= 840 {
                     HStack(alignment: .top, spacing: 24) {
-                        monthGrid.frame(width: 320)
-                        Divider().overlay(NotoDesign.line)
-                        taskDetails.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        monthGrid.padding(16).frame(width: 352)
+                        animatedDetails.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
                 } else {
-                    monthGrid.frame(maxWidth: 420).frame(maxWidth: .infinity)
-                    Divider().overlay(NotoDesign.line)
-                    taskDetails
+                    monthGrid.padding(16).frame(maxWidth: 452).frame(maxWidth: .infinity)
+                    Color.clear.frame(height: 12)
+                    animatedDetails
                 }
             }
             .padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 16)
         }
+    }
+    private var detailIdentity: String { searching ? "search" : model.calendarUnscheduled ? "unscheduled" : AppModel.dateKey(model.selectedCalendarDate) }
+    private var animatedDetails: some View {
+        ZStack(alignment: .topLeading) { taskDetails.id(detailIdentity).transition(.opacity) }
+            .animation(NotoMotion.animation(.navigation), value: detailIdentity)
     }
     private var taskDetails: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -173,7 +159,7 @@ struct TaskCalendar: View {
                             .font(NotoDesign.caption).foregroundStyle(.secondary).padding(.vertical, 16)
                     }
                     ForEach(displayed.filter { !$0.completed }) { entry in
-                        CalendarTaskRow(entry: entry, model: model, showsDate: searching)
+                        CalendarTaskRow(entry: entry, model: model, showsDate: searching).transition(.opacity)
                     }
                     let completed = displayed.filter { $0.completed }
                     if !completed.isEmpty {
@@ -182,6 +168,8 @@ struct TaskCalendar: View {
                         }.font(NotoDesign.caption).foregroundStyle(.secondary).padding(.top, 12)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
+                    .animation(NotoMotion.animation(.layout), value: displayed.filter { !$0.completed }.map(\.id))
+                    .animation(NotoMotion.animation(.layout), value: completedExpanded)
             }.id(searching ? "search" : (model.calendarUnscheduled ? "unscheduled" : AppModel.dateKey(model.selectedCalendarDate)))
         }
     }
@@ -244,11 +232,7 @@ private struct CalendarTaskRow: View {
     let showsDate: Bool
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Button { model.changeTask(entry, status: entry.completed ? "pending" : "completed") } label: {
-                ActionIcon(entry.completed ? "checkmark.circle.fill" : (entry.status == "in_progress" ? "circle.lefthalf.filled" : "circle"))
-                    .foregroundStyle(.secondary)
-            }.buttonStyle(QuietButtonStyle(icon: true)).help(entry.completed ? "重新打开" : "完成任务")
-                .accessibilityLabel(entry.completed ? "重新打开：\(entry.text)" : "完成：\(entry.text)")
+            TaskCompletionButton(entry: entry, model: model)
             VStack(alignment: .leading, spacing: 4) {
                 TaskCardTitle(entry: entry, lines: 2) { model.beginEditing(entry) }.padding(.top, 4)
                 if showsDate { Text(entry.due ?? "未安排").font(.system(size: 11)).foregroundStyle(.secondary) }
@@ -279,5 +263,6 @@ private struct CalendarTaskRow: View {
         .padding(.vertical, 7).padding(.horizontal, 4)
         .background(hovering ? Color.primary.opacity(0.025) : .clear, in: RoundedRectangle(cornerRadius: 6))
         .onHover { hovering = $0 }
+        .animation(NotoMotion.hover, value: hovering)
     }
 }

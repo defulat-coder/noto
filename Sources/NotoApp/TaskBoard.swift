@@ -94,75 +94,114 @@ extension AppModel {
 
 }
 
-struct TaskBoard: View {
+struct TaskCompletionButton: View {
+    let entry: Entry
     @ObservedObject var model: AppModel
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                Text("任务").font(.system(size: 22, weight: .semibold))
-                Spacer(minLength: 12)
-                TaskToolbarActions(model: model)
-            }
-            if model.visibleTasks.isEmpty {
-                HStack(spacing: 8) {
-                    Text(model.search.isEmpty && !model.importantOnly ? "还没有任务" : "没有匹配任务")
-                    if !model.search.isEmpty || model.importantOnly {
-                        Button("清除筛选") { model.setSearch(""); model.setImportantOnly(false) }
-                    }
-                }.font(NotoDesign.caption).foregroundStyle(.secondary)
-            } else if model.importantOnly || !model.search.isEmpty {
-                HStack {
-                    Text(model.importantOnly ? "重要 · \(model.visibleTasks.count) 项" : "\(model.visibleTasks.count) 项匹配任务")
-                    Button("清除筛选") { model.setSearch(""); model.setImportantOnly(false) }.buttonStyle(QuietButtonStyle())
-                }.font(NotoDesign.caption).foregroundStyle(.secondary)
-            }
-            GeometryReader { geometry in
-                ScrollView(.horizontal) {
-                    HStack(alignment: .top, spacing: 16) {
+        Button { model.changeTask(entry, status: entry.completed ? "pending" : "completed") } label: {
+            ActionIcon(entry.completed ? "checkmark.circle.fill" : entry.status == "in_progress" ? "circle.lefthalf.filled" : "circle")
+                .contentTransition(.symbolEffect(.replace))
+                .animation(NotoMotion.animation(.feedback), value: entry.status)
+                .foregroundStyle(entry.completed ? Color.accentColor : Color.secondary)
+        }.buttonStyle(QuietButtonStyle(icon: true)).help(entry.completed ? "重新打开" : "完成任务")
+            .accessibilityLabel(entry.completed ? "重新打开：\(entry.text)" : "完成：\(entry.text)")
+    }
+}
+
+struct TaskBoard: View {
+    @ObservedObject var model: AppModel
+    @State private var column: TodoStatus = .pending
+    @State private var revealedTaskID: String?
+    var body: some View {
+        GeometryReader { geometry in
+            let compact = geometry.size.width < 720
+            VStack(alignment: .leading, spacing: 16) {
+                if compact {
+                    HStack(spacing: 4) {
                         ForEach(TodoStatus.allCases, id: \.self) { status in
-                            TaskColumn(model: model, status: status)
-                                .frame(width: max(260, (geometry.size.width - 32) / 3), height: geometry.size.height)
+                            TaskDropArea(onDrop: { entry in
+                                guard model.changeTask(entry, status: status.rawValue) else { return false }
+                                column = status; return true
+                            }) {
+                                Button { column = status } label: {
+                                    HStack(spacing: 6) {
+                                        Text(status.label)
+                                        Text("\(model.taskColumns[status.rawValue]?.count ?? 0)").foregroundStyle(.secondary).monospacedDigit()
+                                    }.font(.system(size: 12)).frame(maxWidth: .infinity, maxHeight: .infinity)
+                                        .contentShape(Rectangle())
+                                        .background {
+                                            if column == status {
+                                                RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.07))
+                                            }
+                                        }
+                                        .animation(NotoMotion.animation(.navigation), value: column == status)
+                                }.buttonStyle(NavigationButtonStyle(minHeight: 32)).accessibilityLabel("显示\(status.label)")
+                                    .accessibilityAddTraits(column == status ? .isSelected : [])
+                                    .help("显示\(status.label)；拖入任务可更改状态")
+                            }.frame(maxWidth: .infinity).frame(height: 32)
                         }
                     }
                 }
-            }
-        }.padding(.horizontal, 24).padding(.top, 24).padding(.bottom, 16)
+                if model.importantOnly || !model.search.isEmpty {
+                    HStack {
+                        Text("\(model.visibleTasks.count) 个匹配任务").foregroundStyle(.secondary)
+                        Button("清除筛选") { model.setSearch(""); model.setImportantOnly(false) }
+                    }.font(NotoDesign.caption)
+                }
+                if compact {
+                    ZStack { TaskColumn(model: model, status: column, showsHeading: false).id(column).transition(.opacity) }
+                } else {
+                    HStack(alignment: .top, spacing: 16) {
+                        ForEach(TodoStatus.allCases, id: \.self) { status in TaskColumn(model: model, status: status) }
+                    }
+                }
+            }.padding(.horizontal, 24).padding(.top, 16).padding(.bottom, 16)
+                .animation(NotoMotion.animation(.navigation), value: column)
+        }
+        .onChange(of: model.tasks) { _, tasks in revealNewTask(in: tasks) }
+        .onChange(of: model.highlightedTaskID) { _, _ in revealNewTask(in: model.tasks) }
+    }
+    private func revealNewTask(in tasks: [Entry]) {
+        guard let id = model.highlightedTaskID, id != revealedTaskID,
+              let task = tasks.first(where: { $0.id == id }), let status = TodoStatus(rawValue: task.status ?? "pending") else { return }
+        column = status; revealedTaskID = id
     }
 }
+
 
 private struct TaskColumn: View {
     @ObservedObject var model: AppModel
     let status: TodoStatus
+    var showsHeading = true
     private var tasks: [Entry] { model.taskColumns[status.rawValue] ?? [] }
     private var displayed: [Entry] { status == .completed ? Array(tasks.prefix(model.completedLimit)) : tasks }
     var body: some View {
         TaskDropArea(onDrop: { model.changeTask($0, status: status.rawValue) }) {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Text(status.label).font(.system(size: 13, weight: .semibold))
-                Text("\(tasks.count)").font(NotoDesign.caption).monospacedDigit().foregroundStyle(.secondary)
-                Spacer()
-                if status != .completed {
-                    Button { model.showNewTask(status: status.rawValue) } label: {
-                        ActionIcon("plus")
-                    }.buttonStyle(QuietButtonStyle(icon: true)).help("添加\(status.label)任务").accessibilityLabel("添加\(status.label)任务")
-                }
-            }.frame(height: 28)
+            if showsHeading {
+                HStack(spacing: 8) {
+                    Text(status.label).font(.system(size: 13, weight: .medium))
+                    Text("\(tasks.count)").font(NotoDesign.caption).monospacedDigit().foregroundStyle(.secondary)
+                        .contentTransition(.numericText()).animation(NotoMotion.animation(.feedback), value: tasks.count)
+                    Spacer()
+                }.frame(height: 28)
+            }
             ScrollView {
                 LazyVStack(spacing: 10) {
+                    if displayed.isEmpty { Text("暂无\(status.label)任务").font(NotoDesign.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.vertical, 24) }
                     ForEach(displayed) { entry in
-                        TaskCard(entry: entry, model: model)
+                        TaskCard(entry: entry, model: model).transition(.opacity.combined(with: .scale(scale: 0.985)))
                     }
                     if displayed.count < tasks.count {
                         Button("加载更多") { model.completedLimit += 20 }
                             .buttonStyle(QuietButtonStyle()).font(NotoDesign.caption).padding(.vertical, 10)
                     }
                 }.padding(2)
+                    .animation(NotoMotion.animation(.layout), value: displayed.map(\.id))
             }
         }
         .padding(12)
-        .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(NotoDesign.line, lineWidth: 0.5))
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
 
         }
@@ -177,8 +216,8 @@ struct TaskCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 6) {
-                if entry.completed { Image(systemName: "checkmark").font(.system(size: 11)).foregroundStyle(.secondary).padding(.top, 3).accessibilityLabel("已完成") }
-                TaskCardTitle(entry: entry) { model.beginEditing(entry) }
+                TaskCompletionButton(entry: entry, model: model)
+                TaskCardTitle(entry: entry) { model.beginEditing(entry) }.padding(.top, 4)
             }
             HStack(spacing: 4) {
                 if important {
@@ -213,11 +252,10 @@ struct TaskCard: View {
                     Button("删除任务", role: .destructive) { model.deleteTask(entry) }.disabled(model.busy)
                 } label: { ActionIcon("ellipsis") }
                     .actionMenuStyle().help("任务操作").accessibilityLabel("任务操作")
-            }
+            }.padding(.leading, 34)
         }
         .padding(12)
-        .background(NotoDesign.canvas, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(model.highlightedTaskID == entry.id ? Color.accentColor.opacity(0.5) : NotoDesign.line, lineWidth: 0.5))
+        .background(model.highlightedTaskID == entry.id ? Color.accentColor.opacity(0.10) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
         .contentShape(Rectangle())
         .onTapGesture { model.beginEditing(entry) }
     }
@@ -247,13 +285,9 @@ struct TaskEditor: View {
                     .help(important.wrappedValue ? "取消重要" : "标记重要")
                     .accessibilityLabel("重要任务").accessibilityValue(important.wrappedValue ? "已开启" : "已关闭")
                 Spacer()
-                if !creating {
-                    Picker("状态", selection: status) {
+                Picker("状态", selection: status) {
                         ForEach(TodoStatus.allCases, id: \.self) { Text($0.label).tag($0.rawValue) }
-                    }.labelsHidden().frame(width: 120).accessibilityLabel("任务状态")
-                } else if status.wrappedValue != "pending" {
-                    Text(TodoStatus(rawValue: status.wrappedValue)?.label ?? "待开始").font(NotoDesign.caption).foregroundStyle(.secondary)
-                }
+                }.labelsHidden().frame(width: 120).accessibilityLabel("任务状态")
             }
             if !model.editError.isEmpty {
                 Label(model.editError, systemImage: "exclamationmark.circle").font(NotoDesign.caption).foregroundStyle(.red)
@@ -261,12 +295,13 @@ struct TaskEditor: View {
             }
             HStack {
                 Spacer()
-                Button(creating ? "收起" : "放弃修改", action: cancel).buttonStyle(QuietButtonStyle())
+                Button("取消", action: cancel).buttonStyle(QuietButtonStyle())
                 Button("保存", action: save).buttonStyle(QuietButtonStyle(prominent: true)).help("保存（⌘↵）；回车换行")
                     .disabled(text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(24).frame(width: 440)
+        .background(NotoGlassSurface(radius: 20))
         .interactiveDismissDisabled(model.editDirty || (creating && model.taskDraftDirty))
         .onExitCommand(perform: cancel)
     }
@@ -299,7 +334,7 @@ struct TaskDateControl: View {
                         DatePicker("截止日期", selection: $selectedDate, displayedComponents: .date).datePickerStyle(.graphical)
                         Button("确定") { choose(selectedDate) }
                     }
-                    Divider()
+                    Color.clear.frame(height: 6)
                     Button("清除日期") { hasDue = false; open = false }.disabled(!hasDue)
                 }.buttonStyle(QuietButtonStyle()).padding(12)
             }

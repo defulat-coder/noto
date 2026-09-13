@@ -21,7 +21,6 @@ struct SyncSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("账号与同步").font(.headline)
             VStack(alignment: .leading, spacing: 6) {
                 Label(controller.isSignedIn ? "账号空间" : "本机空间",
                       systemImage: controller.isSignedIn ? "person.crop.circle" : "internaldrive")
@@ -31,7 +30,7 @@ struct SyncSettingsView: View {
                     Label(controller.status, systemImage: "arrow.triangle.2.circlepath")
                         .accessibilityLabel("同步状态：\(controller.status)")
                 } else {
-                    Text("笔记、任务和对话仅保存在这台 Mac。")
+                    Text("记录、任务和对话仅保存在这台 Mac。")
                 }
             }
             .font(NotoDesign.caption).foregroundStyle(.secondary)
@@ -42,7 +41,7 @@ struct SyncSettingsView: View {
             if !controller.lastError.isEmpty { errorText(controller.lastError) }
             if !model.message.isEmpty && model.isError { errorText(model.message) }
 
-            Divider()
+            Color.clear.frame(height: 6)
             DisclosureGroup("高级服务配置", isExpanded: $showConfiguration) {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(controller.isSignedIn ? "返回本机后可更换同步服务。" : "填写部署方提供的服务地址与公开密钥，再登录账号。")
@@ -75,7 +74,7 @@ struct SyncSettingsView: View {
                 .disabled(controller.isSyncing)
             Button("取消", role: .cancel) { }
         } message: {
-            Text("本机任务会复制到 \(controller.email ?? "当前账号") 并上传，同一账号的其他设备也能看到。本机原任务保留，笔记和对话不会上传；重复导入不会创建重复任务。")
+            Text("本机任务会复制到 \(controller.email ?? "当前账号") 并上传，同一账号的其他设备也能看到。本机原任务保留，记录和对话不会上传；重复导入不会创建重复任务。")
         }
         .onAppear {
             server = controller.configuration?.supabaseURL.absoluteString ?? ""
@@ -86,13 +85,13 @@ struct SyncSettingsView: View {
 
     private var signedOut: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("登录会切换到独立的账号空间；本机内容保留，返回本机时可继续使用。只有任务跨设备同步。")
+            Text("登录后切换到账号空间，本机内容保留。只有任务跨设备同步。")
                 .font(NotoDesign.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if controller.configuration == nil {
                 Button { showConfiguration = true } label: {
                     Label("配置同步服务", systemImage: "slider.horizontal.3")
                 }.buttonStyle(QuietButtonStyle(prominent: true))
-                Text("先配置服务，再用同一账号连接 Mac 与 iPhone。")
+                Text("使用同一账号同步多台 Mac 的任务。")
                     .font(NotoDesign.caption).foregroundStyle(.secondary)
             } else {
                 TextField("邮箱", text: $email).textContentType(.username)
@@ -116,7 +115,7 @@ struct SyncSettingsView: View {
 
     private var signedIn: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("任务在 Mac 与 iPhone 间自动同步；笔记和对话只保存在当前设备的账号空间。")
+            Text("任务在登录同一账号的 Mac 间同步；记录和对话只保存在当前设备的账号空间。")
                 .font(NotoDesign.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if controller.pendingCount > 0 {
                 Text("\(controller.pendingCount) 项修改待上传，已保存在本机。")
@@ -136,14 +135,14 @@ struct SyncSettingsView: View {
             }.disabled(controller.isSyncing)
             Text("返回本机会退出登录。账号数据与待同步修改仍保留，重新登录后可继续使用和同步。")
                 .font(NotoDesign.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Divider()
+            Color.clear.frame(height: 6)
             Button { showImportConfirmation = true } label: {
                 Label("导入本机任务…", systemImage: "square.and.arrow.down")
             }.disabled(controller.isSyncing)
             Text("复制任务到此账号，本机原任务保留。")
                 .font(NotoDesign.caption).foregroundStyle(.secondary)
             if !controller.conflicts.isEmpty {
-                Divider()
+                Color.clear.frame(height: 6)
                 DisclosureGroup(isExpanded: $showConflicts) {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("同一任务的另一份修改已保留，可另存为新任务。")

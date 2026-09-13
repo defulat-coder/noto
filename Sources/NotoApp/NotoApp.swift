@@ -49,6 +49,7 @@ final class AppModel: ObservableObject {
     @Published var undoAvailable = false
     @Published var provider: Provider { didSet { UserDefaults.standard.set(provider.rawValue, forKey: "provider") } }
     private(set) var store: Store?
+    private(set) var pill: PillController?
     @Published private(set) var sync: SyncController?
     @Published private(set) var lastDeletedTaskID: String?
     private var syncSubscriptions = Set<AnyCancellable>()
@@ -73,16 +74,17 @@ final class AppModel: ObservableObject {
         preview = injectedStore == nil && CommandLine.arguments.contains("--preview")
         persistsViewMode = injectedStore == nil && !CommandLine.arguments.contains("--preview") && ProcessInfo.processInfo.environment["NOTO_DATABASE"] == nil
         provider = Provider(rawValue: UserDefaults.standard.string(forKey: "provider") ?? "opencode") ?? .opencode
+        pill = PillController(appModel: self)
         if injectedStore != nil || preview {
             do {
                 store = try injectedStore ?? Store(url: preview ? nil : Store.defaultURL)
                 if preview {
                     _ = try store?.add(kind: "todo", text: "整理草图", due: Self.dateKey(Calendar.current.date(byAdding: .day, value: 1, to: Date())!))
                     _ = try store?.add(kind: "note", text: "今天想清楚了产品方向。")
-                    _ = try store?.add(kind: "todo", text: "梳理任务看板的交互细节", status: "in_progress", priority: "important")
-                    _ = try store?.add(kind: "todo", text: "完成第一轮设计讨论", status: "completed")
+                    _ = try store?.add(kind: "todo", text: "梳理任务看板的交互细节", due: Self.dateKey(Date()), status: "in_progress", priority: "important")
+                    _ = try store?.add(kind: "todo", text: "完成第一轮设计讨论", due: Self.dateKey(Date()), status: "completed")
                     draft = "记一下，今天想清楚了产品方向。明天下午把草图整理好。"
-                    message = "已记下，并添加了明天的待办。"
+                    message = "已记下，并添加了明天的任务。"
                     undoAfter = try store?.list() ?? []; undoAvailable = true
                 }
             } catch { store = nil; message = "无法打开数据：\(error.localizedDescription)"; isError = true }
@@ -400,7 +402,7 @@ final class AppModel: ObservableObject {
             let entry = try store.add(kind: isTodo ? "todo" : "note", text: content)
             draft = ""; composerPosition = nil
             if !search.isEmpty { search = "" }
-            remember(before: [], after: [entry], message: isTodo ? "已添加待办。" : "已记下。")
+            remember(before: [], after: [entry], message: isTodo ? "已添加任务。" : "已记下。")
         } catch { fail(error) }
     }
     func toggle(_ entry: Entry) {
@@ -509,12 +511,22 @@ final class AppModel: ObservableObject {
     func cancel() { runner?.cancel() }
 }
 
+@MainActor
+final class NotoApplicationDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+}
+
 @main
 struct NotoApp: App {
+    @NSApplicationDelegateAdaptor(NotoApplicationDelegate.self) private var appDelegate
     @StateObject private var model = AppModel()
     var body: some Scene {
         Window("noto", id: "main") {
-            ContentView(model: model)
+            Group {
+                if model.preview && CommandLine.arguments.contains("--preview-pill"), let pill = model.pill {
+                    PillPreviewView(model: pill.model)
+                } else { ContentView(model: model) }
+            }
                 .buttonStyle(QuietButtonStyle())
                 .frame(minWidth: 620, minHeight: 480)
                 .onAppear {
@@ -528,7 +540,8 @@ struct NotoApp: App {
                             window.titlebarSeparatorStyle = .none
                             window.styleMask.insert(.fullSizeContentView)
                             window.isMovableByWindowBackground = model.mode == .notes
-                            window.backgroundColor = NSColor.textBackgroundColor
+                            window.backgroundColor = .clear
+                            window.isOpaque = false
                             if isolated { window.setContentSize(CommandLine.arguments.contains("--compact") ? NSSize(width: 620, height: 700) : NSSize(width: 1340, height: 954)); window.center() }
                         }
                     }
@@ -540,7 +553,7 @@ struct NotoApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("新建内容") { model.showComposer() }.keyboardShortcut("n").disabled(model.settings || model.recentlyDeleted)
                 Button("提交当前输入") { model.submitFocusedInput() }.keyboardShortcut(.return, modifiers: .command).disabled(model.settings || model.recentlyDeleted)
-                Button("添加待办") { model.save(todo: true) }.keyboardShortcut(.return, modifiers: [.command, .shift])
+                Button("保存为任务") { model.save(todo: true) }.keyboardShortcut(.return, modifiers: [.command, .shift])
                     .disabled(model.composerPosition == nil || model.settings || model.recentlyDeleted)
             }
             CommandGroup(replacing: .undoRedo) {
@@ -580,8 +593,7 @@ extension Notification.Name {
 // Shared native tokens. Semantic colors follow macOS appearance and contrast.
 enum NotoDesign {
     static let canvas = Color(nsColor: .textBackgroundColor)
-    static let field = Color(nsColor: .controlBackgroundColor)
-    static let line = Color(nsColor: .separatorColor).opacity(0.6)
+    static let field = Color.primary.opacity(0.045)
     static let body = Font.system(size: 15)
     static let caption = Font.system(size: 12)
     static let radius: CGFloat = 12
@@ -594,6 +606,8 @@ struct QuietButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var enabled
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(NotoMotion.animation(.feedback), value: configuration.isPressed)
             .font(.system(size: 13, weight: .regular))
             .padding(.horizontal, icon ? 0 : 10)
             .frame(minWidth: 28, minHeight: 28)
@@ -614,6 +628,7 @@ private struct ActionSurface: ViewModifier {
                         in: RoundedRectangle(cornerRadius: 6))
             .contentShape(RoundedRectangle(cornerRadius: 6))
             .onHover { hovering = $0 }
+            .animation(NotoMotion.hover, value: hovering)
     }
 }
 
@@ -634,92 +649,68 @@ struct ActionIcon: View {
 }
 
 struct ContentView: View {
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject var model: AppModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @AppStorage("datesExpanded") private var datesExpanded = false
+    @AppStorage("datesExpanded") private var datesExpanded = true
     @State private var activeDay: String?
+    @Namespace private var navigationSelection
     var body: some View {
         GeometryReader { geometry in
-            let narrow = geometry.size.width < 980
+            let narrow = geometry.size.width < 1100
             let showChatOnly = narrow && model.conversation != nil && !model.readingRequested
             HStack(spacing: 0) {
                 if !showChatOnly {
-                    VStack(spacing: 0) {
-                    if model.mode == .calendar {
-                        TaskCalendar(model: model).padding(.top, 48)
-                    } else if model.mode == .board {
-                        TaskBoard(model: model).padding(.top, 48)
-                    } else {
                     ScrollViewReader { proxy in
                         HStack(spacing: 0) {
-                            if !model.entries.isEmpty {
-                                DateRail(model: model, expanded: datesExpanded, activeDay: activeDay, maxHeight: geometry.size.height,
-                                         width: datesExpanded ? (geometry.size.width < 800 ? 144 : 180) : 88) { id in
-                                    activeDay = id
-                                    proxy.scrollTo("content-" + id, anchor: .top)
+                            sidebar(proxy: proxy, height: geometry.size.height)
+                            VStack(spacing: 0) {
+                                header(width: geometry.size.width, narrow: narrow)
+                                ZStack(alignment: .topLeading) {
+                                    if model.mode == .calendar { TaskCalendar(model: model).transition(.opacity) }
+                                    else if model.mode == .board { TaskBoard(model: model).transition(.opacity) }
+                                    else {
+                                        ReadingPane(model: model, activeDay: $activeDay).transition(.opacity)
+                                            .onReceive(NotificationCenter.default.publisher(for: .focusComposer)) { _ in
+                                                if model.composerPosition == CGPoint(x: 24, y: 40) { proxy.scrollTo("history-top", anchor: .top) }
+                                            }
+                                            .onChange(of: model.search) { _, _ in
+                                                activeDay = model.groups.first?.id; proxy.scrollTo("history-top", anchor: .top)
+                                            }
+                                    }
+                                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                                    .animation(NotoMotion.animation(.navigation), value: model.mode)
+                                if !model.message.isEmpty {
+                                    feedback.padding(.horizontal, 24).padding(.bottom, 16)
+                                        .transition(.opacity.combined(with: .offset(y: 6)))
                                 }
                             }
-                            ReadingPane(model: model, activeDay: $activeDay)
-                                .onReceive(NotificationCenter.default.publisher(for: .focusComposer)) { _ in
-                                    if model.composerPosition == CGPoint(x: 24, y: 40) { proxy.scrollTo("history-top", anchor: .top) }
-                                }
-                                .onChange(of: model.search) { _, _ in
-                                    activeDay = model.groups.first?.id
-                                    proxy.scrollTo("history-top", anchor: .top)
-                                }
-                                .padding(.top, 48)
                         }
-                    }
-                    }
-                    if !model.message.isEmpty { feedback.padding(.horizontal, 24).padding(.bottom, 16) }
-                    }
-                    .overlay(alignment: .top) {
-                        HStack {
-                            if model.mode == .notes {
-                            Button {
-                                withAnimation(reduceMotion ? nil : .timingCurve(0.23, 1, 0.32, 1, duration: 0.18)) { datesExpanded.toggle() }
-                            } label: { ActionIcon("sidebar.left") }
-                                .buttonStyle(QuietButtonStyle(icon: true)).foregroundStyle(.secondary).disabled(model.entries.isEmpty)
-                                .help(datesExpanded ? "收起日期侧栏" : "展开日期侧栏")
-                                .accessibilityLabel(datesExpanded ? "收起日期侧栏" : "展开日期侧栏")
-                            }
-                            ViewModeMenu(model: model)
-                            if model.mode == .notes {
-                                Button { model.showComposer() } label: { ActionIcon("square.and.pencil") }
-                                    .buttonStyle(QuietButtonStyle(icon: true)).help("写一笔（⌘N）").accessibilityLabel("写一笔")
-                            }
-                            if narrow && model.conversation != nil {
-                                Button {
-                                    guard model.leaveUnchangedEditor() else { return }
-                                    model.composerPosition = nil; model.readingRequested = false
-                                } label: { ActionIcon("bubble.left") }
-                                    .buttonStyle(QuietButtonStyle(icon: true)).help("返回当前对话").accessibilityLabel("返回当前对话")
-                            }
-                            Spacer()
-                            Button { model.settings = true } label: {
-                                Label(model.sync?.isSignedIn == true ? "账号" : "本机", systemImage: model.sync?.isSignedIn == true ? "person.crop.circle" : "internaldrive")
-                                    .font(NotoDesign.caption).foregroundStyle(.secondary)
-                            }.buttonStyle(QuietButtonStyle())
-                                .help(model.sync?.isSignedIn == true ? "当前账号：\(model.sync?.email ?? "") · \(model.sync?.status ?? "")" : "当前内容保存在本机 · 打开设置")
-                                .accessibilityLabel("\(model.sync?.isSignedIn == true ? "账号空间" : "本机空间")，打开设置")
-                            if model.reloading { ProgressView().controlSize(.small).help("正在读取记录") }
-                            SearchInput(text: Binding(get: { model.search }, set: { model.setSearch($0) }), placeholder: model.mode.isTaskView ? "搜索任务与对话" : "搜索记录与对话").frame(width: geometry.size.width < 800 ? 154 : 190, height: 28)
-                        }.padding(.leading, 86).padding(.trailing, 20).padding(.top, 10)
                     }
                 }
                 if model.conversation != nil && (!narrow || showChatOnly) {
-                    if !narrow { Divider() }
+                    if !narrow { Color.clear.frame(width: 20) }
                     ConversationView(model: model, compact: narrow)
-                        .frame(width: narrow ? geometry.size.width : min(440, max(340, geometry.size.width * 0.37)))
+                        .frame(width: narrow ? geometry.size.width : 380)
+                        .transition(.opacity.combined(with: .offset(x: 12)))
                 }
             }
+            .animation(NotoMotion.animation(.layout), value: datesExpanded)
+            .animation(NotoMotion.animation(.layout), value: !narrow && model.conversation != nil)
+            .animation(NotoMotion.animation(.navigation), value: showChatOnly)
+            .animation(NotoMotion.animation(.feedback), value: model.message.isEmpty)
+        }
+        .onAppear {
+            NotoMotion.start()
+            model.pill?.showWindow = { openWindow(id: "main") }
+            model.pill?.start()
         }
         .onChange(of: model.mode) { _, mode in
             NSApp.windows.first(where: { $0.identifier?.rawValue == "main" })?.isMovableByWindowBackground = mode == .notes
         }
         .disabled(model.opening)
         .overlay { if model.opening { ProgressView("正在打开记录…").padding(20).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10)) } }
-        .background(NotoDesign.canvas).foregroundStyle(.primary)
+        .background(NotoGlassSurface(radius: 20)).foregroundStyle(.primary)
         .ignoresSafeArea(.container, edges: .top)
         .onExitCommand {
             if model.taskCreating { model.taskCreating = false }
@@ -730,11 +721,82 @@ struct ContentView: View {
         }
         .sheet(isPresented: Binding(get: { model.taskCreating || (model.mode.isTaskView && model.editing != nil) }, set: { value in
             if !value { _ = model.leaveUnchangedEditor() }
-        })) { TaskEditor(model: model) }
-        .sheet(isPresented: $model.settings) { SettingsView(model: model) }
-        .sheet(isPresented: $model.recentlyDeleted) { RecentlyDeletedView(model: model) }
+        })) { TaskEditor(model: model).presentationBackground(.clear) }
+        .sheet(isPresented: $model.settings) { SettingsView(model: model).presentationBackground(.clear) }
+        .sheet(isPresented: $model.recentlyDeleted) { RecentlyDeletedView(model: model).presentationBackground(.clear) }
+        .task(id: model.message) {
+            guard !model.message.isEmpty, !model.isError else { return }
+            do {
+                try await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled, !model.isError else { return }
+                model.message = ""
+            } catch { }
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.refreshIfChanged() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in model.cancel() }
+    }
+    private var sidebarWidth: CGFloat { datesExpanded ? 168 : 60 }
+    private func sidebar(proxy: ScrollViewProxy, height: CGFloat) -> some View {
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Spacer(minLength: 0)
+                                    Button { datesExpanded.toggle() } label: { ActionIcon("sidebar.left") }
+                                        .buttonStyle(QuietButtonStyle(icon: true))
+                                        .help(datesExpanded ? "收起侧栏" : "展开侧栏").accessibilityLabel("切换侧栏")
+                                }.padding(.horizontal, 10).padding(.top, datesExpanded ? 6 : 38).padding(.bottom, 12)
+                                ForEach(ContentMode.allCases) { mode in
+                                    Button { model.switchMode(mode) } label: {
+                                        HStack(spacing: 10) {
+                                            SidebarBadge(symbol: mode.icon)
+                                            if datesExpanded { Text(mode.label); Spacer() }
+                                        }.padding(.horizontal, 8).frame(height: 40)
+                                            .frame(maxWidth: .infinity, alignment: datesExpanded ? .leading : .center)
+                                            .contentShape(Rectangle())
+                                            .background {
+                                                if model.mode == mode {
+                                                    RoundedRectangle(cornerRadius: 7).fill(Color.accentColor.opacity(0.10))
+                                                        .matchedGeometryEffect(id: "navigation", in: navigationSelection).allowsHitTesting(false)
+                                                }
+                                            }
+                                    }.buttonStyle(NavigationButtonStyle()).help(mode.label).accessibilityLabel(mode.label)
+                                        .accessibilityAddTraits(model.mode == mode ? .isSelected : [])
+                                }.padding(.horizontal, datesExpanded ? 8 : 0)
+                                if datesExpanded && model.mode == .notes && !model.entries.isEmpty {
+                                    Text("日期").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                                        .padding(.leading, 20).padding(.top, 22)
+                                    DateRail(model: model, expanded: true, activeDay: activeDay, maxHeight: height, width: sidebarWidth - 8) { id in
+                                        NotoMotion.perform(.navigation) { activeDay = id; proxy.scrollTo("content-" + id, anchor: .top) }
+                                    }
+                                } else { Spacer() }
+                                Button { model.settings = true } label: {
+                                    HStack(spacing: 10) {
+                                        SidebarBadge(symbol: "gearshape")
+                                        if datesExpanded { Text("设置"); Spacer() }
+                                    }.frame(maxWidth: .infinity, alignment: .leading).padding(8).contentShape(Rectangle())
+                                }.buttonStyle(NavigationButtonStyle()).help("设置（⌘,）").accessibilityLabel("设置")
+                            }.font(.system(size: 13)).padding(.bottom, 12)
+                                .animation(NotoMotion.animation(.navigation), value: model.mode)
+                                .frame(width: sidebarWidth - 8)
+                                .padding(4)
+    }
+    private func header(width: CGFloat, narrow: Bool) -> some View {
+                                HStack(spacing: 12) {
+                                    Text(model.mode.label).font(.system(size: 15, weight: .semibold))
+                                    Spacer(minLength: 0)
+                                    if narrow && model.conversation != nil {
+                                        Button {
+                                            guard model.leaveUnchangedEditor() else { return }
+                                            model.composerPosition = nil; model.readingRequested = false
+                                        } label: { ActionIcon("bubble.left") }.help("返回当前对话").accessibilityLabel("返回当前对话")
+                                    }
+                                    if model.reloading { ProgressView().controlSize(.small) }
+                                    SearchInput(text: Binding(get: { model.search }, set: { model.setSearch($0) }), placeholder: model.mode.isTaskView ? "搜索任务与对话" : "搜索记录与对话")
+                                        .frame(width: width < 800 ? 140 : 190, height: 28)
+                                    if model.mode.isTaskView { ImportantTaskFilter(model: model) }
+                                    Button { model.showComposer() } label: { Label("新建", systemImage: "plus") }
+                                        .buttonStyle(QuietButtonStyle())
+                                        .help("新建内容（⌘N）").accessibilityLabel(model.mode.isTaskView ? "新建任务" : "新建记录")
+                                }.padding(.horizontal, 24).frame(height: 58)
     }
     private var feedback: some View {
         HStack(spacing: 10) {
@@ -747,8 +809,7 @@ struct ContentView: View {
             Button { model.message = "" } label: { ActionIcon("xmark") }
                 .buttonStyle(QuietButtonStyle(icon: true)).accessibilityLabel("关闭操作提示")
         }.font(NotoDesign.caption).padding(10)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(NotoDesign.line, lineWidth: 0.5)).frame(maxWidth: 620)
+            .frame(maxWidth: .infinity)
     }
 }
 
@@ -770,12 +831,12 @@ private struct ReadingPane: View {
                         if model.entries.isEmpty && model.editing == nil {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text(model.search.isEmpty ? "留下一点今天。" : "没有找到相关记录").font(.system(size: 17, weight: .medium))
-                                Text(model.search.isEmpty ? "想法、待办，先记下来。" : "试试其他关键词。")
+                                Text(model.search.isEmpty ? "想法、任务，先记下来。" : "试试其他关键词。")
                                     .font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(5)
                                 if !model.search.isEmpty {
                                     Button("清空搜索") { model.setSearch("") }.buttonStyle(QuietButtonStyle()).font(NotoDesign.caption)
                                 } else {
-                                    Button("写一笔") { model.showComposer() }.buttonStyle(QuietButtonStyle(prominent: true)).help("新建记录（⌘N）")
+                                    Button("新建记录") { model.showComposer() }.buttonStyle(QuietButtonStyle(prominent: true)).help("新建记录（⌘N）")
                                 }
                             }.excludeFromBlankInput()
                         } else {
@@ -786,15 +847,14 @@ private struct ReadingPane: View {
                                     Text("\(model.entries.count)\(model.hasMore ? "+" : "") 条记录").font(NotoDesign.caption).foregroundStyle(.secondary)
                                 }.padding(.bottom, 24).excludeFromBlankInput()
                             }
-                            LazyVStack(alignment: .leading, spacing: 32) {
+                            LazyVStack(alignment: .leading, spacing: 24) {
                                 ForEach(model.groups) { group in
                                     VStack(alignment: .leading, spacing: 12) {
                                         HStack(spacing: 12) {
                                             Text(group.label).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
-                                            Rectangle().fill(NotoDesign.line).frame(height: 0.5)
                                         }.excludeFromBlankInput()
-                                        LazyVStack(spacing: 4) {
-                                            ForEach(group.entries) { entry in EntryRow(entry: entry, model: model).excludeFromBlankInput() }
+                                        LazyVStack(spacing: 1) {
+                                            ForEach(group.entries) { entry in EntryRow(entry: entry, model: model).excludeFromBlankInput().transition(.opacity) }
                                         }
                                     }.id("content-" + group.id)
                                         .background(GeometryReader { frame in
@@ -811,7 +871,8 @@ private struct ReadingPane: View {
                         }
                     }
                     .frame(maxWidth: 620, alignment: .leading).padding(.horizontal, 24)
-                    .padding(.top, 48).padding(.bottom, 100).id("history-top").frame(maxWidth: .infinity)
+                    .padding(.top, 24).padding(.bottom, 100).id("history-top").frame(maxWidth: .infinity)
+                    .animation(NotoMotion.animation(.layout), value: model.entries.map(\.id))
                 }
                 .coordinateSpace(name: "history")
                 .onPreferenceChange(DayPositions.self) { positions in
@@ -824,8 +885,10 @@ private struct ReadingPane: View {
                         .frame(width: width)
                         .onGeometryChange(for: CGSize.self) { $0.size } action: { composerSize = $0 }
                         .offset(x: origin.x, y: origin.y)
+                        .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .topLeading)))
                 }
             }
+            .animation(NotoMotion.animation(.layout), value: model.composerPosition)
             .coordinateSpace(name: "reading")
             .onPreferenceChange(OccupiedAreas.self) { occupied = $0 }
             .background(BlankClickObserver(excluded: occupied, floatingRect: floatingRect,
@@ -840,25 +903,24 @@ private struct NewContentInput: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("记一笔").font(NotoDesign.caption).foregroundStyle(.secondary)
+                Text("新建记录").font(NotoDesign.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button { model.composerPosition = nil } label: { ActionIcon("xmark") }
                     .buttonStyle(QuietButtonStyle(icon: true)).accessibilityLabel("收起录入，保留草稿")
             }
             Composer(text: $model.draft, enabled: true, purpose: .newContent, onSubmit: { model.save() }, onCancel: { model.composerPosition = nil })
                 .frame(minHeight: 48)
-            if model.busy { Text("AI 正在回复，你可以继续保存笔记。").font(NotoDesign.caption).foregroundStyle(.secondary) }
+            if model.busy { Text("AI 正在回复，你可以继续保存记录。").font(NotoDesign.caption).foregroundStyle(.secondary) }
             HStack(spacing: 6) {
-                Button("询问 AI") { model.ask() }.disabled(model.busy)
+                Button("与 AI 讨论") { model.ask() }.disabled(model.busy)
                 Spacer(minLength: 0)
-                Menu { Button("存为任务") { model.save(todo: true) } } label: {
+                Menu { Button("保存为任务") { model.save(todo: true) } } label: {
                     ActionIcon("chevron.down")
                 }.actionMenuStyle().help("其他保存方式").accessibilityLabel("其他保存方式")
-                Button("保存小记") { model.save() }.buttonStyle(QuietButtonStyle(prominent: true)).help("保存小记（⌘↵）；回车换行")
+                Button("保存") { model.save() }.buttonStyle(QuietButtonStyle(prominent: true)).help("保存记录（⌘↵）；回车换行")
             }.font(NotoDesign.caption).buttonStyle(QuietButtonStyle()).disabled(empty)
         }.padding(16)
-            .background(NotoDesign.field, in: RoundedRectangle(cornerRadius: NotoDesign.radius))
-            .overlay(RoundedRectangle(cornerRadius: NotoDesign.radius).stroke(NotoDesign.line, lineWidth: 0.5))
+            .background(NotoDesign.canvas, in: RoundedRectangle(cornerRadius: NotoDesign.radius))
             .shadow(color: .black.opacity(0.12), radius: 18, y: 5)
     }
 }
@@ -923,7 +985,7 @@ struct ConversationView: View {
                         .buttonStyle(QuietButtonStyle(icon: true)).help("返回记录，保留对话").accessibilityLabel("返回记录")
                 }
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("对话").font(.system(size: 17, weight: .semibold))
+                    Text("AI 对话").font(.system(size: 15, weight: .semibold))
                     Text(model.conversation?.text ?? "").font(NotoDesign.caption).foregroundStyle(.secondary).lineLimit(2)
                 }
                 Spacer()
@@ -931,8 +993,7 @@ struct ConversationView: View {
                     Button { model.closeConversation() } label: { ActionIcon("xmark") }
                         .buttonStyle(QuietButtonStyle(icon: true)).help("关闭对话（Esc）").accessibilityLabel("关闭对话").disabled(model.busy)
                 }
-            }.padding(.horizontal, 24).padding(.top, 54).padding(.bottom, 20)
-            Divider().padding(.horizontal, 24)
+            }.padding(.horizontal, 24).padding(.top, compact ? 44 : 20).padding(.bottom, 16)
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 28) {
@@ -959,6 +1020,7 @@ struct ConversationView: View {
                                     }.padding(.top, 4)
                                 }
                             }.frame(maxWidth: .infinity, alignment: .leading)
+                                .transition(.opacity.combined(with: .offset(y: 4)))
                         }
                         if model.busy {
                             HStack(spacing: 10) { ProgressView().controlSize(.small); Text("正在回复…").font(NotoDesign.caption).foregroundStyle(.secondary) }
@@ -971,6 +1033,8 @@ struct ConversationView: View {
                         }
                         Color.clear.frame(height: 1).id("chat-bottom")
                     }.padding(24)
+                        .animation(model.messages.last?.role == "assistant" ? NotoMotion.arrival : NotoMotion.animation(.feedback), value: model.messages.count)
+                        .animation(NotoMotion.arrival, value: model.busy)
                 }
                 .onChange(of: model.messages.count) { _, _ in proxy.scrollTo("chat-bottom", anchor: .bottom) }
                 .onChange(of: model.busy) { _, busy in
@@ -999,20 +1063,19 @@ struct ConversationView: View {
                 Composer(text: $model.chatDraft, enabled: true, purpose: .chat, onSubmit: { model.sendChat() }, onCancel: { model.closeConversation() })
                     .frame(minHeight: 40).fixedSize(horizontal: false, vertical: true)
                     .padding(14).background(NotoDesign.field, in: RoundedRectangle(cornerRadius: NotoDesign.radius))
-                    .overlay(RoundedRectangle(cornerRadius: NotoDesign.radius).stroke(NotoDesign.line, lineWidth: 0.5))
-                HStack {
+                        HStack {
                     Spacer()
                     if model.busy {
                         Button { model.cancel() } label: { ActionIcon("stop.fill") }
                             .buttonStyle(QuietButtonStyle(icon: true)).help("停止回复").accessibilityLabel("停止回复")
                     } else {
-                        Button { model.sendChat() } label: { ActionIcon("arrow.up") }
-                            .buttonStyle(QuietButtonStyle(icon: true)).foregroundStyle(Color.accentColor).help("发送消息（⌘ 回车）").accessibilityLabel("发送消息")
+                        Button("发送") { model.sendChat() }
+                            .buttonStyle(QuietButtonStyle(prominent: true)).help("发送消息（⌘ 回车）").accessibilityLabel("发送消息")
                             .disabled(pending || model.chatDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }.font(NotoDesign.caption)
             }.padding(.horizontal, 24).padding(.bottom, 20).padding(.top, 12)
-        }.background(Color(nsColor: .windowBackgroundColor))
+        }
     }
 }
 
@@ -1083,10 +1146,10 @@ struct DateRail: View {
             }
             .frame(maxHeight: expanded ? .infinity : min(400, maxHeight * 0.6))
         }
-        .padding(.top, expanded ? 58 : 0)
+        .padding(.top, 0)
         .frame(width: width)
         .frame(maxHeight: .infinity, alignment: expanded ? .topLeading : .center)
-        .background(expanded ? Color.primary.opacity(0.018) : Color.clear)
+        .background(Color.clear)
     }
 }
 
@@ -1103,48 +1166,37 @@ struct EntryRow: View {
     private func edit() { model.beginEditing(entry) }
     var body: some View {
         Group {
-        if model.editing?.id == entry.id { InlineEditView(entry: entry, model: model) } else {
-        HStack(alignment: .top, spacing: 12) {
-            if entry.kind == "todo" {
-                Toggle("完成待办", isOn: Binding(get: { entry.completed }, set: { _ in model.toggle(entry) }))
-                    .toggleStyle(.checkbox).labelsHidden().padding(.top, 3)
-                    .accessibilityLabel("\(entry.completed ? "重新打开" : "完成")：\(entry.text)")
-            }
-            VStack(alignment: .leading, spacing: 8) {
+        if model.editing?.id == entry.id { InlineEditView(entry: entry, model: model).transition(.opacity) } else {
+        HStack(alignment: .top, spacing: 10) {
+            if entry.kind == "todo" { TaskCompletionButton(entry: entry, model: model) }
+            else { Color.clear.frame(width: 28, height: 1).accessibilityHidden(true) }
+            VStack(alignment: .leading, spacing: 6) {
                 EntryBodyText(text: entry.text, completed: entry.completed, onEdit: edit)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                HStack(spacing: 8) {
-                    Text(entry.createdAt, style: .time).font(.system(size: 11)).monospacedDigit().foregroundStyle(.secondary)
-                    if entry.due != nil {
-                        Text(dueLabel).font(.system(size: 11)).foregroundStyle(overdue ? Color.orange : Color.secondary)
-                    }
-                    if entry.kind == "todo" {
-                        if entry.status == "in_progress" { Text("进行中").font(NotoDesign.caption).foregroundStyle(.secondary) }
-                        if entry.priority == "important" {
-                            Button { model.changeTask(entry, priority: "normal") } label: {
-                                ActionIcon("star.fill")
-                            }.buttonStyle(QuietButtonStyle(icon: true)).help("取消重要")
-                                .accessibilityLabel("取消重要")
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 4)
+                    .help(entry.createdAt.formatted(date: .abbreviated, time: .shortened))
+                if entry.due != nil || entry.status == "in_progress" || entry.priority == "important" || entry.hasConversation {
+                    HStack(spacing: 8) {
+                        if entry.priority == "important" { Image(systemName: "star.fill").foregroundStyle(.secondary).accessibilityLabel("重要任务") }
+                        if entry.status == "in_progress" { Text("进行中") }
+                        if entry.due != nil { Text(dueLabel).foregroundStyle(overdue ? Color.orange : Color.secondary) }
+                        if entry.hasConversation {
+                            Button("对话", systemImage: "bubble.left") { model.openConversation(entry) }
+                                .buttonStyle(.plain).disabled(model.busy).help("打开对话")
                         }
-                    }
-                    Spacer(minLength: 0)
-                    if entry.hasConversation {
-                        Button { model.openConversation(entry) } label: { ActionIcon("bubble.left") }
-                            .buttonStyle(QuietButtonStyle(icon: true)).foregroundStyle(model.conversation?.id == entry.id ? Color.accentColor : Color.secondary)
-                            .help("打开对话").accessibilityLabel("打开对话").disabled(model.busy)
-                    }
-                    Menu { actions } label: { ActionIcon("ellipsis") }
-                        .actionMenuStyle()
-                        .help("记录操作").accessibilityLabel("记录操作")
+                    }.font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
+            Menu { actions } label: { ActionIcon("ellipsis") }
+                .actionMenuStyle().foregroundStyle(.secondary)
+                .help("记录操作").accessibilityLabel("记录操作")
         }
-        .padding(12)
+        .padding(.vertical, 10).padding(.horizontal, 4)
         .background(model.conversation?.id == entry.id ? Color.accentColor.opacity(0.055) : .clear, in: RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
         .contextMenu { actions }
         }
         }
+        .animation(NotoMotion.animation(.navigation), value: model.editing?.id == entry.id)
     }
     @ViewBuilder private var actions: some View {
             Button("编辑", action: edit)
@@ -1291,7 +1343,7 @@ struct Composer: NSViewRepresentable {
 
 struct SearchInput: NSViewRepresentable {
     @Binding var text: String
-    var placeholder = "搜索笔记与对话"
+    var placeholder = "搜索记录与对话"
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> NSSearchField {
         let view = NSSearchField()
@@ -1339,7 +1391,7 @@ struct InlineEditView: View {
     @ObservedObject var model: AppModel
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(entry.kind == "todo" ? "编辑待办" : "编辑小记").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+            Text(entry.kind == "todo" ? "编辑任务" : "编辑记录").font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
             Composer(text: $model.editDraft, enabled: true, purpose: .edit, onSubmit: { model.saveEditing() }, onCancel: { model.cancelEditing() })
                 .frame(minHeight: 64)
             if entry.kind == "todo" {
@@ -1365,34 +1417,5 @@ struct InlineEditView: View {
             }.font(NotoDesign.caption)
         }.padding(16)
             .background(NotoDesign.field, in: RoundedRectangle(cornerRadius: NotoDesign.radius))
-            .overlay(RoundedRectangle(cornerRadius: NotoDesign.radius).stroke(Color.accentColor.opacity(0.35), lineWidth: 1))
-    }
-}
-
-struct SettingsView: View {
-    @ObservedObject var model: AppModel
-    @State private var showDeleted = false
-    var body: some View {
-        ScrollView {
-        VStack(alignment: .leading, spacing: 24) {
-            Text("设置").font(.system(size: 17, weight: .semibold))
-            VStack(alignment: .leading, spacing: 12) {
-                Picker("AI CLI", selection: $model.provider) {
-                    ForEach(Provider.allCases) { provider in Text(provider.title).tag(provider) }
-                }
-                Text("使用本机已登录的 CLI，下次对话生效。").font(NotoDesign.caption).foregroundStyle(.secondary).lineSpacing(4)
-            }
-            Divider()
-            Button { showDeleted = true } label: { Label("最近删除", systemImage: "trash") }
-            Divider()
-            if let sync = model.sync { SyncSettingsView(model: model, controller: sync) }
-            else { Text("预览模式不连接同步服务。").foregroundStyle(.secondary) }
-            Divider()
-            HStack { Spacer(); Button("完成") { model.settings = false }.keyboardShortcut(.defaultAction).disabled(model.sync?.isSyncing == true) }
-        }.padding(28)
-        }.buttonStyle(QuietButtonStyle()).frame(width: 540, height: 660)
-            .sheet(isPresented: $showDeleted) { RecentlyDeletedView(model: model) }
-            .interactiveDismissDisabled(model.sync?.isSyncing == true)
-            .onExitCommand { if model.sync?.isSyncing != true { model.settings = false } }
     }
 }

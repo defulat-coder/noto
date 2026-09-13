@@ -13,11 +13,17 @@ struct TaskDropArea<Content: View>: NSViewRepresentable {
 
     func makeNSView(context: Context) -> TaskDropHost {
         let view = TaskDropHost(rootView: AnyView(content()))
+        // SwiftUI owns the available column width; long titles must wrap, not resize the window.
+        view.sizingOptions = []
         view.registerForDraggedTypes([.notoTask])
         return view
     }
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: TaskDropHost, context: Context) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height, width.isFinite, height.isFinite else { return nil }
+        return CGSize(width: width, height: height)
+    }
     func updateNSView(_ view: TaskDropHost, context: Context) {
-        view.rootView = AnyView(content())
+        withTransaction(context.transaction) { view.rootView = AnyView(content()) }
         view.onDrop = onDrop
     }
 }

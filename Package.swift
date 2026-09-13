@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Noto",
-    platforms: [.macOS(.v14), .iOS(.v17)],
+    platforms: [.macOS(.v14)],
     products: [
         .library(name: "NotoCore", targets: ["NotoCore"]),
         .library(name: "NotoSync", targets: ["NotoSync"]),

@@ -27,7 +27,7 @@ supabase db reset
 supabase status
 ```
 
-`db reset` destroys **local** database contents; use only a disposable development instance. The migration is automatically loaded from `supabase/migrations`. API is at `http://127.0.0.1:54321`, Studio at port 54323, and local confirmation-email inbox at port 54324. Email confirmations are enabled. A simulator can use the Mac's loopback service; a physical iPhone needs reachable development services and appropriate HTTPS configuration. Use the anonymous/publishable project key on clients, never a service-role key or database password.
+`db reset` destroys **local** database contents; use only a disposable development instance. The migration is automatically loaded from `supabase/migrations`. API is at `http://127.0.0.1:54321`, Studio at port 54323, and local confirmation-email inbox at port 54324. Email confirmations are enabled. The desktop app can use the Mac's loopback service; another Mac needs reachable development services and appropriate HTTPS configuration. Use the anonymous/publishable project key on clients, never a service-role key or database password.
 
 ## Deploy a dedicated test project
 

@@ -17,7 +17,7 @@ The generated `backend/.local-docker/client-fixture.json` contains only the clie
 
 Accounts: `alice@noto.local` and `bob@noto.local`, password `Noto-local-only-2026!`. Both are local-only fixtures. PowerSync verifies real Supabase ES256 access tokens through the local JWKS endpoint; no custom fake-auth endpoint is used.
 
-The live test opens three independent PowerSync/SQLite databases (two Alice devices and one Bob device), performs Auth login and RPC uploads, verifies replicated tasks/conflicts and user isolation, and tests tombstone/restore delivery. The desktop/iOS app integration tests are separate and must also pass.
+The live test opens three independent PowerSync/SQLite databases (two Alice devices and one Bob device), performs Auth login and RPC uploads, verifies replicated tasks/conflicts and user isolation, and tests tombstone/restore delivery. The desktop app integration tests are separate and must also pass.
 
 Stop services without deleting data:
 
