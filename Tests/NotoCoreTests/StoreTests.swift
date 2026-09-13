@@ -134,6 +134,81 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(backup.conversations.count, 1)
     }
 
+    func testAIWorkspaceMigrationAndDeletionLeaveDatabaseRecoverable() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let legacy = root.appendingPathComponent("legacy/scope/conversation")
+        let cache = root.appendingPathComponent("cache/scope/conversation")
+        for path in [legacy, cache] { try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true) }
+        try "old".write(to: legacy.appendingPathComponent("conversation.json"), atomically: true, encoding: .utf8)
+        try "current".write(to: cache.appendingPathComponent("conversation.json"), atomically: true, encoding: .utf8)
+        try "records".write(to: legacy.appendingPathComponent("records.json"), atomically: true, encoding: .utf8)
+        try AgentWorkspace.migrateLegacy(from: root.appendingPathComponent("legacy"), to: root.appendingPathComponent("cache"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("legacy").path))
+        XCTAssertEqual(try String(contentsOf: cache.appendingPathComponent("conversation.json"), encoding: .utf8), "current")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cache.appendingPathComponent("records.json").path))
+        let store = try Store(url: nil)
+        let task = try store.add(kind: "todo", text: "恢复检查")
+        try store.appendQuestion("已有对话", to: task.id)
+        let workspace = AgentWorkspace.directory(database: nil, conversationID: task.id)
+        defer { try? FileManager.default.removeItem(at: workspace) }
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        try "cache".write(to: workspace.appendingPathComponent("conversation.json"), atomically: true, encoding: .utf8)
+        try store.deleteTodo(id: task.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: workspace.path))
+        try store.restoreTodo(id: task.id)
+        XCTAssertEqual(try store.messages(for: task.id).first?.text, "已有对话")
+        XCTAssertNotNil(try store.entry(id: task.id))
+    }
+
+    func testAIWorkspaceIsStableIsolatedAndUsedByEveryProvider() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = root.appendingPathComponent("local.sqlite")
+        let first = AgentWorkspace.directory(database: database, conversationID: "conversation-a")
+        XCTAssertEqual(first, AgentWorkspace.directory(database: database, conversationID: "conversation-a"))
+        XCTAssertNotEqual(first, AgentWorkspace.directory(database: database, conversationID: "conversation-b"))
+        XCTAssertNotEqual(first, AgentWorkspace.directory(database: root.appendingPathComponent("account.sqlite"), conversationID: "conversation-a"))
+        let workspace = root.appendingPathComponent("workspace")
+        let executable = root.appendingPathComponent("fake-ai")
+        let script = #"""
+        #!/bin/sh
+        pwd > cwd.txt
+        response='{"message":"ok","actions":[]}'
+        case "$1" in
+          exec)
+            while [ "$#" -gt 0 ]; do
+              if [ "$1" = '--output-last-message' ]; then shift; printf '%s' "$response" > "$1"; printf '%s' "$1" > output-path.txt; fi
+              shift
+            done ;;
+          run) printf '%s\n' '{"type":"text","part":{"text":"{\"message\":\"ok\",\"actions\":[]}"}}' ;;
+          *)
+            case "$*" in
+              *stream-json*) printf '%s\n' '{"role":"assistant","content":"{\"message\":\"ok\",\"actions\":[]}"}' ;;
+              *) cat > received.txt; printf '%s' "$response" ;;
+            esac ;;
+        esac
+        """#
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        for provider in Provider.allCases {
+            let reply = try AgentRunner().run(prompt: "hello", entries: [], provider: provider,
+                executable: executable.path, history: [], workspaceURL: workspace)
+            XCTAssertEqual(reply.message, "ok")
+            let cwd = try String(contentsOf: workspace.appendingPathComponent("cwd.txt"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+            XCTAssertEqual(URL(fileURLWithPath: cwd).resolvingSymlinksInPath(), workspace.resolvingSymlinksInPath())
+            let transcript = try JSONDecoder().decode([[String: String]].self, from: Data(contentsOf: workspace.appendingPathComponent("conversation.json")))
+            XCTAssertEqual(transcript.map { $0["role"]! }, ["user", "assistant"])
+            if provider == .codex {
+                let output = try String(contentsOf: workspace.appendingPathComponent("output-path.txt"), encoding: .utf8)
+                XCTAssertTrue(output.hasPrefix(AgentWorkspace.temporaryRoot.path + "/"))
+                XCTAssertFalse(FileManager.default.fileExists(atPath: output))
+            }
+            XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: workspace.path).contains { $0.hasPrefix("run-") })
+        }
+    }
+
     func testAgentCancellationStopsCLIThatIgnoresTerminate() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -143,7 +218,7 @@ final class StoreTests: XCTestCase {
         try "#!/bin/sh\ntrap '' TERM\ntouch '\(ready.path)'\nexec /bin/sleep 30\n".write(to: executable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
         let runner = AgentRunner()
-        let running = Task.detached { try runner.run(prompt: "test", entries: [], provider: .claude, executable: executable.path) }
+        let running = Task.detached { try runner.run(prompt: "test", entries: [], provider: .claude, executable: executable.path, workspaceURL: directory.appendingPathComponent("workspace")) }
         let deadline = Date().addingTimeInterval(3)
         while !FileManager.default.fileExists(atPath: ready.path), Date() < deadline {
             try await Task.sleep(for: .milliseconds(10))

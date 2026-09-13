@@ -492,7 +492,7 @@ final class PillController: NSObject {
         switch element {
         case .today:
             openMainWindow()
-            appModel?.switchMode(.board)
+            appModel?.showDueTasks()
         case .compose:
             openComposer()
         case .settings:

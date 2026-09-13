@@ -143,6 +143,7 @@ extension Store {
             try Self.archiveDeletedTask(db, id: id, document: document)
             _ = try Entry.deleteOne(db, key: id)
         }
+        AgentWorkspace.remove(database: storageURL, conversationID: id)
     }
 
     public func restoreTodo(id: String) throws {
@@ -191,6 +192,7 @@ extension Store {
 
     public func applyRemoteTask(id: String, document: String, revision: Int64, deleted: Bool) throws {
         try db.write { try Self.applyRemote($0, id: id, document: document, revision: revision, deleted: deleted, acknowledging: false) }
+        if deleted, try entry(id: id) == nil { AgentWorkspace.remove(database: storageURL, conversationID: id) }
     }
 
     /// One transaction per downloaded batch, rather than a disk commit for every task.
@@ -200,6 +202,9 @@ extension Store {
             for task in tasks {
                 try Self.applyRemote(db, id: task.id, document: task.document, revision: task.revision, deleted: task.deleted, acknowledging: false)
             }
+        }
+        for task in tasks where task.deleted {
+            if try entry(id: task.id) == nil { AgentWorkspace.remove(database: storageURL, conversationID: task.id) }
         }
     }
 

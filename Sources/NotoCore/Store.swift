@@ -54,6 +54,7 @@ public struct NotoError: LocalizedError {
 
 public final class Store: @unchecked Sendable {
     let db: any DatabaseWriter
+    public let storageURL: URL?
     public static var defaultURL: URL {
         if let path = ProcessInfo.processInfo.environment["NOTO_DATABASE"] { return URL(fileURLWithPath: path) }
         let pointer = localURL.deletingLastPathComponent().appendingPathComponent("active-account.json")
@@ -66,6 +67,7 @@ public final class Store: @unchecked Sendable {
     }
 
     public init(url: URL? = Store.defaultURL, busyTimeout: TimeInterval = 5) throws {
+        storageURL = url?.standardizedFileURL
         if let url {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             var config = Configuration()

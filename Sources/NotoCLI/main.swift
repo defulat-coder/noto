@@ -128,7 +128,8 @@ struct Ask: ParsableCommand {
         guard let selected = Provider(rawValue: provider) else { throw ValidationError("Unknown provider") }
         let store = try output.store()
         let context = try store.list()
-        let response = try AgentRunner().run(prompt: prompt, entries: context, provider: selected)
+        try AgentWorkspace.migrateLegacy()
+        let response = try AgentRunner().run(prompt: prompt, entries: context, provider: selected, workspaceURL: AgentWorkspace.directory(database: store.storageURL, conversationID: UUID().uuidString))
         if apply { _ = try store.apply(response.actions, expected: context) }
         try printJSON(response)
     }

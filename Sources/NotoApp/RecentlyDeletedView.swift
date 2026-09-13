@@ -12,7 +12,7 @@ struct RecentlyDeletedView: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("最近删除").font(.system(size: 17, weight: .semibold))
+                    Text("最近删除").font(.system(size: 16, weight: .semibold))
                     Text(model.sync?.isSignedIn == true ? "当前账号空间 · 恢复后继续同步" : "本机空间")
                         .font(NotoDesign.caption).foregroundStyle(.secondary)
                 }
@@ -32,7 +32,7 @@ struct RecentlyDeletedView: View {
                                 VStack(alignment: .leading, spacing: 6) {
                                     Text(entry.text).font(NotoDesign.body).lineLimit(4).textSelection(.enabled)
                                     HStack {
-                                        if let due = entry.due { Text(due) }
+                                        if let due = entry.due { Text(TaskDates.taskLabel(due, completed: entry.completed)) }
                                         if entry.hasConversation { Label("含对话", systemImage: "bubble.left") }
                                     }.font(NotoDesign.caption).foregroundStyle(.secondary)
                                 }.frame(maxWidth: .infinity, alignment: .leading)

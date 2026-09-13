@@ -28,6 +28,20 @@ struct ImportantTaskFilter: View {
 /// Calendar arithmetic, never UTC parsing or fixed 24-hour intervals for date-only tasks.
 enum TaskDates {
     static var local: Calendar { var calendar = Calendar(identifier: .gregorian); calendar.timeZone = .current; calendar.firstWeekday = 2; return calendar }
+    static func taskLabel(_ key: String, completed: Bool = false, today: Date = Date()) -> String {
+        guard let value = date(key) else { return key }
+        let formatter = DateFormatter(); formatter.calendar = local
+        formatter.dateFormat = local.isDate(value, equalTo: today, toGranularity: .year) ? "M月d日" : "yyyy年M月d日"
+        if completed { return formatter.string(from: value) }
+        if local.isDate(value, inSameDayAs: today) { return "今天" }
+        if let tomorrow = local.date(byAdding: .day, value: 1, to: today), local.isDate(value, inSameDayAs: tomorrow) { return "明天" }
+        return value < local.startOfDay(for: today) ? "已逾期 · " + formatter.string(from: value) : formatter.string(from: value)
+    }
+    @MainActor static func dayHeading(_ date: Date) -> String {
+        let formatter = DateFormatter(); formatter.calendar = local; formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "EEEE"
+        return taskLabel(AppModel.dateKey(date), completed: date < local.startOfDay(for: Date())) + " · " + formatter.string(from: date)
+    }
     static func date(_ key: String, calendar: Calendar = local) -> Date? {
         let parts = key.split(separator: "-").compactMap { Int($0) }
         guard key.count == 10, parts.count == 3,
@@ -90,6 +104,7 @@ extension AppModel {
 struct TaskCalendar: View {
     @ObservedObject var model: AppModel
     @State private var completedExpanded = false
+    @State private var occupied: [CGRect] = []
     private var searching: Bool { !model.search.isEmpty }
     private var displayed: [Entry] { searching ? model.calendarTasks : model.calendarDetailTasks }
     private var monthLabel: String {
@@ -108,6 +123,7 @@ struct TaskCalendar: View {
                         iconButton("location", "回到今天") { model.selectCalendarDate(Date()) }
                     }
                     Spacer(minLength: 0)
+                    ImportantTaskFilter(model: model)
                     TaskDropArea(onDrop: { model.rescheduleTask($0, due: nil) }) {
                         Button { model.showUnscheduled() } label: {
                             Label("未安排 \(model.calendarGroups[""]?.count ?? 0)", systemImage: "tray")
@@ -146,32 +162,41 @@ struct TaskCalendar: View {
     private var taskDetails: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text(searching ? "结果" : (model.calendarUnscheduled ? "未安排" : AppModel.dateKey(model.selectedCalendarDate)))
+                Text(searching ? "结果" : (model.calendarUnscheduled ? "未安排" : TaskDates.dayHeading(model.selectedCalendarDate)))
                     .font(.system(size: 14, weight: .semibold))
-                Text("\(displayed.filter { !$0.completed }.count)").font(NotoDesign.caption).foregroundStyle(.secondary)
+                Text("\(displayed.filter { !$0.completed }.count) 项待办").font(NotoDesign.caption).foregroundStyle(.secondary)
                     .accessibilityLabel("\(displayed.filter { !$0.completed }.count) 个待完成任务")
                 Spacer()
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
                     if displayed.isEmpty {
-                        Text(searching ? "没有找到相关任务" : "这里还没有任务")
-                            .font(NotoDesign.caption).foregroundStyle(.secondary).padding(.vertical, 16)
+                        Button(searching ? "没有匹配任务 · 新建" : "添加任务") {
+                            model.quickCreateTask(date: searching || model.calendarUnscheduled ? nil : model.selectedCalendarDate)
+                        }.buttonStyle(QuietButtonStyle()).foregroundStyle(.secondary).padding(.vertical, 16)
+                            .excludeFromBlankInput(in: "calendar-details")
                     }
                     ForEach(displayed.filter { !$0.completed }) { entry in
-                        CalendarTaskRow(entry: entry, model: model, showsDate: searching).transition(.opacity)
+                        CalendarTaskRow(entry: entry, model: model, showsDate: searching).excludeFromBlankInput(in: "calendar-details").transition(.opacity)
                     }
                     let completed = displayed.filter { $0.completed }
                     if !completed.isEmpty {
                         DisclosureGroup("已完成 \(completed.count)", isExpanded: $completedExpanded) {
                             ForEach(completed) { entry in CalendarTaskRow(entry: entry, model: model, showsDate: searching) }
-                        }.font(NotoDesign.caption).foregroundStyle(.secondary).padding(.top, 12)
+                        }.font(NotoDesign.caption).foregroundStyle(.secondary).padding(.top, 12).excludeFromBlankInput(in: "calendar-details")
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
                     .animation(NotoMotion.animation(.layout), value: displayed.filter { !$0.completed }.map(\.id))
                     .animation(NotoMotion.animation(.layout), value: completedExpanded)
             }.id(searching ? "search" : (model.calendarUnscheduled ? "unscheduled" : AppModel.dateKey(model.selectedCalendarDate)))
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .coordinateSpace(name: "calendar-details")
+        .onPreferenceChange(OccupiedAreas.self) { occupied = $0 }
+        .background(BlankClickObserver(excluded: occupied, floatingRect: nil,
+            onDoubleClick: { _ in
+                model.quickCreateTask(date: searching || model.calendarUnscheduled ? nil : model.selectedCalendarDate)
+            }, onOutsideClick: {}))
     }
     private func iconButton(_ icon: String, _ label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) { ActionIcon(icon) }
@@ -203,7 +228,7 @@ private struct CalendarDay: View {
     var body: some View {
         let openCount = tasks.filter { !$0.completed }.count
         TaskDropArea(onDrop: { model.rescheduleTask($0, due: AppModel.dateKey(date)) }) {
-            Button { model.selectCalendarDate(date) } label: {
+            Button { if !model.taskCreating { model.selectCalendarDate(date) } } label: {
                 VStack(spacing: 0) {
                     Text("\(TaskDates.local.component(.day, from: date))")
                         .font(.system(size: 12, weight: selected ? .semibold : .regular))
@@ -218,6 +243,10 @@ private struct CalendarDay: View {
                 .background(selected ? Color.primary.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 6))
                 .contentShape(Rectangle())
             }.buttonStyle(.plain)
+                .simultaneousGesture(TapGesture(count: 2).onEnded {
+                    model.quickCreateTask(date: date)
+                })
+                .help("单击查看任务，双击新建当天任务")
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("\(AppModel.dateKey(date))，\(openCount) 待完成，\(tasks.count - openCount) 已完成")
                 .accessibilityAddTraits(selected ? .isSelected : [])
@@ -235,16 +264,16 @@ private struct CalendarTaskRow: View {
             TaskCompletionButton(entry: entry, model: model)
             VStack(alignment: .leading, spacing: 4) {
                 TaskCardTitle(entry: entry, lines: 2) { model.beginEditing(entry) }.padding(.top, 4)
-                if showsDate { Text(entry.due ?? "未安排").font(.system(size: 11)).foregroundStyle(.secondary) }
+                HStack(spacing: 8) {
+                    if showsDate { Text(entry.due.map { TaskDates.taskLabel($0, completed: entry.completed) } ?? "未安排").font(.system(size: 11)).foregroundStyle(.secondary) }
+                    if entry.hasConversation { ConversationShortcut(entry: entry, model: model, compact: true) }
+                }
             }
             if entry.priority == "important" {
                 Button { model.changeTask(entry, priority: "normal") } label: { ActionIcon("star.fill") }
                     .buttonStyle(QuietButtonStyle(icon: true)).foregroundStyle(.secondary).help("取消重要").accessibilityLabel("取消重要")
             }
-            if entry.hasConversation {
-                Button { model.openConversation(entry) } label: { ActionIcon("bubble.left") }
-                    .buttonStyle(QuietButtonStyle(icon: true)).help("打开对话").accessibilityLabel("打开对话").disabled(model.busy)
-            }
+            if !entry.hasConversation { ConversationShortcut(entry: entry, model: model, revealed: hovering) }
             Menu {
                 Button("编辑任务") { model.beginEditing(entry) }
                 Button(entry.hasConversation ? "打开对话" : "与 AI 讨论") { model.openConversation(entry) }.disabled(model.busy)

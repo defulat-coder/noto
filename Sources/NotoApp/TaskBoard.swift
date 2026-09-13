@@ -2,10 +2,19 @@ import SwiftUI
 import AppKit
 import NotoCore
 
+struct TaskDraftAttributes: Equatable {
+    var status = "pending"
+    var important = false
+    var due: String?
+}
+
 extension AppModel {
     var visibleTasks: [Entry] {
         if let cachedVisibleTasks { return cachedVisibleTasks }
-        let result = importantOnly ? tasks.filter { $0.priority == "important" } : tasks
+        let result = tasks.filter {
+            (!importantOnly || $0.priority == "important") &&
+            (!dueOnly || (!$0.completed && ($0.due.map { $0 <= Self.dateKey(Date()) } ?? false)))
+        }
         cachedVisibleTasks = result
         return result
     }
@@ -15,12 +24,22 @@ extension AppModel {
         cachedTaskColumns = result
         return result
     }
-    var taskDraftDirty: Bool { !taskDraft.isEmpty || taskDraftImportant || taskDraftHasDue }
+    var taskDraftAttributes: TaskDraftAttributes {
+        TaskDraftAttributes(status: taskDraftStatus, important: taskDraftImportant,
+                            due: taskDraftHasDue ? Self.dateKey(taskDraftDate) : nil)
+    }
+    var taskDraftDirty: Bool { !taskDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || taskDraftAttributes != taskDraftBaseline }
+
+    func showDueTasks() {
+        guard leaveUnchangedEditor() else { return }
+        switchMode(.board)
+        importantOnly = false; search = ""; dueOnly = true
+    }
 
     func switchMode(_ value: ContentMode) {
         guard value != mode, leaveUnchangedEditor() else { return }
         composerPosition = nil; readingRequested = true
-        mode = value; completedLimit = 20
+        mode = value; dueOnly = false; completedLimit = 20
         if search.isEmpty { reload(reset: true) } else { search = "" }
     }
 
@@ -33,12 +52,27 @@ extension AppModel {
         if taskCreating { return }
         guard leaveUnchangedEditor() else { return }
         composerPosition = nil; readingRequested = true
-        if !taskDraftStarted {
+        taskDraftRestored = taskDraftStarted && taskDraftDirty
+        if !taskDraftRestored {
             taskDraftStatus = status
             taskDraftHasDue = mode == .calendar && !calendarUnscheduled
             taskDraftDate = selectedCalendarDate
+            taskDraftImportant = false
+            taskDraftBaseline = taskDraftAttributes
         }
         taskDraftStarted = true; editError = ""; taskCreating = true
+    }
+
+    /// A fresh quick-entry adopts the clicked context; reopening a draft preserves its choices.
+    func quickCreateTask(status: String = "pending", date: Date? = nil) {
+        guard !taskCreating, !settings, !recentlyDeleted else { return }
+        let resuming = taskDraftStarted && taskDraftDirty
+        showNewTask(status: status)
+        guard taskCreating, !resuming else { return }
+        taskDraftHasDue = date != nil
+        if let date { taskDraftDate = date }
+        taskDraftImportant = importantOnly
+        taskDraftBaseline = taskDraftAttributes
     }
 
     func saveNewTask() {
@@ -48,7 +82,8 @@ extension AppModel {
             let entry = try store.add(kind: "todo", text: taskDraft,
                                       due: taskDraftHasDue ? Self.dateKey(taskDraftDate) : nil,
                                       status: taskDraftStatus, priority: taskDraftImportant ? "important" : "normal")
-            taskCreating = false; taskDraftStarted = false; taskDraft = ""; taskDraftHasDue = false; taskDraftImportant = false
+            taskCreating = false; taskDraftStarted = false; taskDraft = ""; taskDraftHasDue = false; taskDraftImportant = false; taskDraftStatus = "pending"; taskDraftBaseline = TaskDraftAttributes(); taskDraftRestored = false
+            dueOnly = false
             if !search.isEmpty { search = "" }
             if importantOnly && entry.priority != "important" { importantOnly = false }
             remember(before: [], after: [entry], message: "已添加任务。")
@@ -116,8 +151,8 @@ struct TaskBoard: View {
         GeometryReader { geometry in
             let compact = geometry.size.width < 720
             VStack(alignment: .leading, spacing: 16) {
-                if compact {
-                    HStack(spacing: 4) {
+                HStack(spacing: 4) {
+                    if compact && !model.dueOnly {
                         ForEach(TodoStatus.allCases, id: \.self) { status in
                             TaskDropArea(onDrop: { entry in
                                 guard model.changeTask(entry, status: status.rawValue) else { return false }
@@ -140,15 +175,23 @@ struct TaskBoard: View {
                                     .help("显示\(status.label)；拖入任务可更改状态")
                             }.frame(maxWidth: .infinity).frame(height: 32)
                         }
-                    }
+                    } else { Spacer() }
+                    ImportantTaskFilter(model: model)
                 }
-                if model.importantOnly || !model.search.isEmpty {
+                if model.dueOnly || model.importantOnly || !model.search.isEmpty {
                     HStack {
-                        Text("\(model.visibleTasks.count) 个匹配任务").foregroundStyle(.secondary)
-                        Button("清除筛选") { model.setSearch(""); model.setImportantOnly(false) }
+                        Text(model.dueOnly ? "到期待办 · \(model.visibleTasks.count) 项" : "\(model.visibleTasks.count) 个匹配任务").foregroundStyle(.secondary)
+                        Button("清除筛选") { model.setSearch(""); model.setImportantOnly(false); model.dueOnly = false }
                     }.font(NotoDesign.caption)
                 }
-                if compact {
+                if model.dueOnly {
+                    ScrollView {
+                        LazyVStack(spacing: 10) {
+                            if model.visibleTasks.isEmpty { Text("暂无到期待办").font(NotoDesign.caption).foregroundStyle(.secondary).padding(24) }
+                            ForEach(model.visibleTasks) { entry in TaskCard(entry: entry, model: model) }
+                        }.frame(maxWidth: 620).frame(maxWidth: .infinity)
+                    }
+                } else if compact {
                     ZStack { TaskColumn(model: model, status: column, showsHeading: false).id(column).transition(.opacity) }
                 } else {
                     HStack(alignment: .top, spacing: 16) {
@@ -173,6 +216,8 @@ private struct TaskColumn: View {
     @ObservedObject var model: AppModel
     let status: TodoStatus
     var showsHeading = true
+    @State private var occupied: [CGRect] = []
+    private var inputSpace: String { "board-" + status.rawValue }
     private var tasks: [Entry] { model.taskColumns[status.rawValue] ?? [] }
     private var displayed: [Entry] { status == .completed ? Array(tasks.prefix(model.completedLimit)) : tasks }
     var body: some View {
@@ -188,13 +233,13 @@ private struct TaskColumn: View {
             }
             ScrollView {
                 LazyVStack(spacing: 10) {
-                    if displayed.isEmpty { Text("暂无\(status.label)任务").font(NotoDesign.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.vertical, 24) }
+                    if displayed.isEmpty { Button("添加任务") { model.quickCreateTask(status: status.rawValue) }.buttonStyle(QuietButtonStyle()).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.vertical, 24).excludeFromBlankInput(in: inputSpace) }
                     ForEach(displayed) { entry in
-                        TaskCard(entry: entry, model: model).transition(.opacity.combined(with: .scale(scale: 0.985)))
+                        TaskCard(entry: entry, model: model).excludeFromBlankInput(in: inputSpace).transition(.opacity.combined(with: .scale(scale: 0.985)))
                     }
                     if displayed.count < tasks.count {
                         Button("加载更多") { model.completedLimit += 20 }
-                            .buttonStyle(QuietButtonStyle()).font(NotoDesign.caption).padding(.vertical, 10)
+                            .buttonStyle(QuietButtonStyle()).font(NotoDesign.caption).padding(.vertical, 10).excludeFromBlankInput(in: inputSpace)
                     }
                 }.padding(2)
                     .animation(NotoMotion.animation(.layout), value: displayed.map(\.id))
@@ -203,12 +248,17 @@ private struct TaskColumn: View {
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
+        .coordinateSpace(name: inputSpace)
+        .onPreferenceChange(OccupiedAreas.self) { occupied = $0 }
+        .background(BlankClickObserver(excluded: occupied, floatingRect: nil,
+            onDoubleClick: { _ in model.quickCreateTask(status: status.rawValue) }, onOutsideClick: {}))
 
         }
     }
 }
 
 struct TaskCard: View {
+    @State private var hovering = false
     let entry: Entry
     @ObservedObject var model: AppModel
     private var important: Bool { entry.priority == "important" }
@@ -228,16 +278,13 @@ struct TaskCard: View {
                     .accessibilityLabel(important ? "取消重要" : "标记重要")
                 }
                 if let due = entry.due {
-                    Text(overdue ? "已逾期 · \(due)" : (due == AppModel.dateKey(Date()) && !entry.completed ? "今天到期" : due))
+                    Text(TaskDates.taskLabel(due, completed: entry.completed))
                         .font(.system(size: 11)).foregroundStyle(overdue ? Color.orange : Color.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if entry.hasConversation { ConversationShortcut(entry: entry, model: model, compact: true) }
                 Spacer(minLength: 0)
-                if entry.hasConversation {
-                    Button { model.openConversation(entry) } label: {
-                        ActionIcon("bubble.left")
-                    }.buttonStyle(QuietButtonStyle(icon: true)).help("打开对话").accessibilityLabel("打开对话").disabled(model.busy)
-                }
+                if !entry.hasConversation { ConversationShortcut(entry: entry, model: model, revealed: hovering) }
                 Menu {
                     Button("编辑任务") { model.beginEditing(entry) }
                     Button(entry.hasConversation ? "打开对话" : "与 AI 讨论") { model.openConversation(entry) }.disabled(model.busy)
@@ -258,10 +305,12 @@ struct TaskCard: View {
         .background(model.highlightedTaskID == entry.id ? Color.accentColor.opacity(0.10) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 14))
         .contentShape(Rectangle())
         .onTapGesture { model.beginEditing(entry) }
+        .onHover { hovering = $0 }
     }
 }
 
 struct TaskEditor: View {
+    @State private var confirmClose = false
     @ObservedObject var model: AppModel
     private var creating: Bool { model.taskCreating }
     private var text: Binding<String> { creating ? $model.taskDraft : $model.editDraft }
@@ -270,33 +319,51 @@ struct TaskEditor: View {
     private var hasDue: Binding<Bool> { creating ? $model.taskDraftHasDue : $model.editHasDue }
     private var date: Binding<Date> { creating ? $model.taskDraftDate : $model.editDate }
     private func save() { if creating { model.saveNewTask() } else { model.saveEditing() } }
-    private func cancel() { model.taskCreating = false; model.cancelEditing() }
+    private func cancel() {
+        if !creating && model.editDirty { confirmClose = true }
+        else { model.taskCreating = false; model.cancelEditing() }
+    }
+    private var attributesLabel: String {
+        let state = TodoStatus(rawValue: status.wrappedValue)?.label ?? "待开始"
+        return status.wrappedValue == "pending" ? (important.wrappedValue ? "重要" : "更多") : state
+    }
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text(creating ? "新建任务" : "编辑任务").font(.system(size: 18, weight: .semibold))
-            Composer(text: text, enabled: true, purpose: .edit, onSubmit: save, onCancel: cancel, placeholder: "写下要做的事…")
-                .frame(minHeight: 64, maxHeight: 140).padding(12)
-                .background(NotoDesign.field, in: RoundedRectangle(cornerRadius: 8))
-            HStack(spacing: 12) {
-                TaskDateControl(hasDue: hasDue, date: date)
-                Button { important.wrappedValue.toggle() } label: {
-                    ActionIcon(important.wrappedValue ? "star.fill" : "star")
-                }.buttonStyle(QuietButtonStyle(icon: true)).foregroundStyle(important.wrappedValue ? Color.accentColor : Color.secondary)
-                    .help(important.wrappedValue ? "取消重要" : "标记重要")
-                    .accessibilityLabel("重要任务").accessibilityValue(important.wrappedValue ? "已开启" : "已关闭")
-                Spacer()
-                Picker("状态", selection: status) {
-                        ForEach(TodoStatus.allCases, id: \.self) { Text($0.label).tag($0.rawValue) }
-                }.labelsHidden().frame(width: 120).accessibilityLabel("任务状态")
-            }
-            if !model.editError.isEmpty {
-                Label(model.editError, systemImage: "exclamationmark.circle").font(NotoDesign.caption).foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+        VStack(alignment: .leading, spacing: 0) {
             HStack {
+                Text(creating ? (model.taskDraftRestored ? "继续草稿" : "新建任务") : "编辑任务")
+                    .font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary)
                 Spacer()
-                Button("取消", action: cancel).buttonStyle(QuietButtonStyle())
-                Button("保存", action: save).buttonStyle(QuietButtonStyle(prominent: true)).help("保存（⌘↵）；回车换行")
+                Button(action: cancel) { ActionIcon("xmark") }
+                    .buttonStyle(QuietButtonStyle(icon: true))
+                    .help(creating ? "收起，保留草稿（Esc）" : "取消编辑（Esc）")
+                    .accessibilityLabel(creating ? "收起新建任务，保留草稿" : "取消编辑")
+            }
+            Composer(text: text, enabled: true, purpose: .edit, onSubmit: save, onCancel: cancel, placeholder: "想做什么？")
+                .frame(minHeight: 48).fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 18).padding(.bottom, 22)
+            if !model.editError.isEmpty {
+                Label(model.editError, systemImage: "exclamationmark.circle")
+                    .font(NotoDesign.caption).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true).padding(.bottom, 12)
+            }
+            HStack(spacing: 4) {
+                TaskDateControl(hasDue: hasDue, date: date)
+                Menu {
+                    Toggle("重要任务", isOn: important)
+                    Divider()
+                    Picker("状态", selection: status) {
+                        ForEach(TodoStatus.allCases, id: \.self) { Text($0.label).tag($0.rawValue) }
+                    }.pickerStyle(.inline)
+                } label: {
+                    Label(attributesLabel, systemImage: important.wrappedValue ? "star.fill" : "ellipsis")
+                        .font(.system(size: 12)).padding(.horizontal, 8).frame(height: 28)
+                        .foregroundStyle(important.wrappedValue ? Color.accentColor : Color.secondary)
+                }.actionMenuStyle().accessibilityLabel("任务属性")
+                    .accessibilityValue("\(TodoStatus(rawValue: status.wrappedValue)?.label ?? "待开始")，\(important.wrappedValue ? "重要" : "普通")")
+                    .help("设置重要标记和任务状态")
+                Spacer(minLength: 12)
+                Button(creating ? "创建" : "保存", action: save)
+                    .buttonStyle(QuietButtonStyle(prominent: true)).help("⌘↵ 保存；回车换行")
                     .disabled(text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
@@ -304,6 +371,11 @@ struct TaskEditor: View {
         .background(NotoGlassSurface(radius: 20))
         .interactiveDismissDisabled(model.editDirty || (creating && model.taskDraftDirty))
         .onExitCommand(perform: cancel)
+        .alert("保存任务修改？", isPresented: $confirmClose) {
+            Button("保存") { save() }.disabled(text.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button("放弃修改", role: .destructive) { model.cancelEditing() }
+            Button("继续编辑", role: .cancel) { }
+        } message: { Text("关闭前可以保存修改，或继续编辑。") }
     }
 }
 

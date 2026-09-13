@@ -1,6 +1,7 @@
 #if os(macOS)
 import Foundation
 import Darwin
+import CryptoKit
 
 public enum Provider: String, CaseIterable, Identifiable, Sendable {
     case codex, claude, opencode, kimi
@@ -17,6 +18,49 @@ public enum Provider: String, CaseIterable, Identifiable, Sendable {
         let versions = (try? FileManager.default.contentsOfDirectory(at: nvm, includingPropertiesForKeys: nil)) ?? []
         return versions.sorted { $0.lastPathComponent.compare($1.lastPathComponent, options: .numeric) == .orderedDescending }
             .map { $0.appendingPathComponent("bin/\(rawValue)").path }.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+}
+
+/// Provider-independent workspace, isolated by database and conversation identity.
+public enum AgentWorkspace {
+    public static var root: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("Noto/AI", isDirectory: true)
+    }
+    public static var temporaryRoot: URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("Noto/AI", isDirectory: true)
+    }
+
+    /// Move legacy generated files into Caches, preserving unknown files on conflicts.
+    public static func migrateLegacy(from source: URL = Store.localURL.deletingLastPathComponent().appendingPathComponent("AI"), to destination: URL = root) throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: source.path) else { return }
+        if !fm.fileExists(atPath: destination.path) {
+            try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try fm.moveItem(at: source, to: destination)
+            return
+        }
+        for item in try fm.contentsOfDirectory(at: source, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]) {
+            let target = destination.appendingPathComponent(item.lastPathComponent)
+            let values = try item.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            if !fm.fileExists(atPath: target.path) { try fm.moveItem(at: item, to: target) }
+            else if values.isDirectory == true && values.isSymbolicLink != true {
+                try migrateLegacy(from: item, to: target)
+            } else if ["conversation.json", "records.json"].contains(item.lastPathComponent) {
+                try fm.removeItem(at: item)
+            }
+        }
+        if try fm.contentsOfDirectory(atPath: source.path).isEmpty { try fm.removeItem(at: source) }
+    }
+
+    public static func remove(database: URL?, conversationID: String) {
+        try? FileManager.default.removeItem(at: directory(database: database, conversationID: conversationID))
+    }
+
+    public static func directory(database: URL?, conversationID: String) -> URL {
+        let base = database == nil ? FileManager.default.temporaryDirectory.appendingPathComponent("Noto-AI-Preview") : root
+        func key(_ value: String) -> String { SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined() }
+        return base.appendingPathComponent(key(database?.standardizedFileURL.path ?? "preview"), isDirectory: true)
+            .appendingPathComponent(key(conversationID), isDirectory: true)
     }
 }
 
@@ -37,12 +81,14 @@ public final class AgentRunner: @unchecked Sendable {
         }
     }
 
-    public func run(prompt: String, entries: [Entry], provider: Provider, executable: String? = nil, history: [ChatMessage]? = nil, onEvent: (@Sendable (String) -> Void)? = nil) throws -> AIResponse {
+    public func run(prompt: String, entries: [Entry], provider: Provider, executable: String? = nil, history: [ChatMessage]? = nil, workspaceURL: URL? = nil, onEvent: (@Sendable (String) -> Void)? = nil) throws -> AIResponse {
         guard let path = executable ?? provider.locate(), FileManager.default.isExecutableFile(atPath: path) else {
             throw NotoError("没有找到 \(provider.title)。请先安装，或在设置中选择已安装的 AI CLI。")
         }
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("noto-agent-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let workspace = workspaceURL ?? AgentWorkspace.directory(database: Store.defaultURL, conversationID: UUID().uuidString)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let dir = AgentWorkspace.temporaryRoot.appendingPathComponent("run-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: dir) }
         let output = dir.appendingPathComponent("output.txt")
         let errors = dir.appendingPathComponent("error.txt")
@@ -57,6 +103,7 @@ public final class AgentRunner: @unchecked Sendable {
         guard data.count < 250_000 else { throw NotoError("记录较多，请先搜索缩小范围后再交给 AI。") }
         let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd HH:mm EEEE"; formatter.locale = Locale(identifier: "zh_CN")
         let instruction = """
+        This is Noto's dedicated conversation workspace, not a software project. The application has already supplied the complete available conversation and selected records below. Answer directly from them. Do not ask the user to open a document or folder to begin this conversation. If necessary information is absent, ask only for that specific information. Do not claim to have read files or documents that were not provided.
         You are Noto's personal notes/todos interpreter. Do not use tools, inspect files, run commands, or write any data yourself. Only return one JSON object, without Markdown fences or commentary.
         Schema: {"message":"简短中文回复", "actions":[{"operation":"add_note|add_todo|complete|reopen|update|convert_to_todo","id":null,"text":null,"due":null,"status":null,"priority":null,"clearDue":false}]}
         All action keys must be present. Task status is pending, in_progress or completed; task priority is normal or important. Additions default to pending and normal. Only mark important when explicitly requested. Notes must have status/priority null. convert_to_todo preserves the record ID and conversation; use its exact existing ID. For additions text is required and id is null; notes must have due null. For complete/reopen use exact existing todo id; text/due null. For update use exact id and only the fields to change; null fields preserve existing values. Set clearDue true to remove a due date (due must then be null). Status and priority can only be set on tasks, or during convert_to_todo. Use status in_progress to start work. Reopen means pending. Dates must be local YYYY-MM-DD or null, never converted through UTC. The task calendar groups these same todos by due; to move a task to a calendar date update only due, and to move it to Unscheduled set clearDue true. Preserve status and priority when changing calendar placement. No deletion supported. This app tracks due dates only, it does NOT schedule timed notifications; if asked for a reminder explain that only a dated todo can be recorded. Never claim a timed reminder was set.
@@ -70,7 +117,7 @@ public final class AgentRunner: @unchecked Sendable {
         USER_REQUEST_JSON:
         \(String(decoding: try encoder.encode(prompt), as: UTF8.self))
         """
-        let task = Process(); task.executableURL = URL(fileURLWithPath: path); task.currentDirectoryURL = dir
+        let task = Process(); task.executableURL = URL(fileURLWithPath: path); task.currentDirectoryURL = workspace
         var environment = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         environment["PATH"] = ([URL(fileURLWithPath: path).deletingLastPathComponent().path, "\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] + [(environment["PATH"] ?? "")]).joined(separator: ":")
@@ -90,6 +137,10 @@ public final class AgentRunner: @unchecked Sendable {
             guard instruction.utf8.count < 180_000 else { throw NotoError("这段对话已超出 Kimi 当前命令的输入容量。历史已保存，请开启新对话。") }
             task.arguments = ["-p", instruction, "--output-format", "stream-json"]
         }
+        var transcript = (history ?? []).map { ["role": $0.role, "text": $0.text] }
+        transcript.append(["role": "user", "text": prompt])
+        try encoder.encode(transcript).write(to: workspace.appendingPathComponent("conversation.json"), options: .atomic)
+        try data.write(to: workspace.appendingPathComponent("records.json"), options: .atomic)
         task.environment = environment; task.standardOutput = outHandle; task.standardError = errHandle
         let input = dir.appendingPathComponent("input.txt")
         try instruction.write(to: input, atomically: true, encoding: .utf8)
@@ -129,7 +180,10 @@ public final class AgentRunner: @unchecked Sendable {
                 return event["content"] as? String
             }.last ?? ""
         }
-        return try history == nil ? Self.decode(text) : Self.decodeConversation(text)
+        let response = try history == nil ? Self.decode(text) : Self.decodeConversation(text)
+        transcript.append(["role": "assistant", "text": response.message])
+        try encoder.encode(transcript).write(to: workspace.appendingPathComponent("conversation.json"), options: .atomic)
+        return response
     }
 
     private static func readOutput(_ url: URL, limit: Int = 2_000_000) throws -> String {

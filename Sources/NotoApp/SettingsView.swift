@@ -33,6 +33,26 @@ struct NotoGlassSurface: View {
     }
 }
 
+/// A quieter, denser material separates navigation from the clear reading surface.
+struct NotoSidebarSurface: View {
+    var radius: CGFloat = 16
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        Group {
+            if reduceTransparency {
+                shape.fill(Color(nsColor: .controlBackgroundColor))
+                    .overlay(shape.fill(Color.primary.opacity(0.04)))
+            } else if #available(macOS 26.0, *) {
+                Color.clear.glassEffect(.regular.tint(Color.primary.opacity(0.04)), in: shape)
+            } else {
+                shape.fill(.regularMaterial)
+                    .overlay(shape.fill(Color.primary.opacity(0.025)))
+            }
+        }.allowsHitTesting(false)
+    }
+}
+
 struct SidebarBadge: View {
     let symbol: String
     var body: some View {
@@ -80,7 +100,7 @@ struct SettingsView: View {
                                     Label { Text(provider.title) } icon: { Image(nsImage: provider.settingsIcon) }.tag(provider)
                                 }
                             }.labelsHidden().pickerStyle(.menu).fixedSize().frame(width: 216, alignment: .trailing)
-                                .help("下一次对话生效，已有对话保留原工具。")
+                                .help("下一次请求生效，正在执行的请求不受影响。")
                         }.frame(minHeight: 36)
                     }
                     VStack(spacing: 4) {
@@ -167,7 +187,7 @@ struct SettingsView: View {
     }
 }
 
-private extension Provider {
+extension Provider {
     var settingsIcon: NSImage {
         guard let url = Bundle.module.url(forResource: rawValue, withExtension: "png"),
               let image = NSImage(contentsOf: url) else { return NSImage() }

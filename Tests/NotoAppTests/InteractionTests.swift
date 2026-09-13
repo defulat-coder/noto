@@ -1,9 +1,147 @@
 import XCTest
 import AppKit
+import SwiftUI
 import NotoCore
 @testable import NotoApp
 
 final class InteractionTests: XCTestCase {
+    func testSearchActionAndEscapeClearQuery() async {
+        await Task { @MainActor in
+            var query = ""
+            let input = SearchInput(text: Binding(get: { query }, set: { query = $0 }))
+            let coordinator = input.makeCoordinator()
+            let field = NSSearchField()
+            field.stringValue = "查询"
+            coordinator.searchChanged(field)
+            XCTAssertEqual(query, "查询")
+            field.stringValue = ""
+            coordinator.searchChanged(field)
+            XCTAssertEqual(query, "")
+            field.stringValue = "再次查询"
+            coordinator.searchChanged(field)
+            XCTAssertTrue(coordinator.control(field, textView: NSTextView(), doCommandBy: #selector(NSResponder.cancelOperation(_:))))
+            XCTAssertEqual(query, "")
+
+        }.value
+    }
+
+    func testGlobalAIEntryDoesNotCreateEmptyRecordsAndRetainsDraft() async throws {
+        try await Task { @MainActor in
+            let store = try Store(url: nil)
+            let entry = try store.add(kind: "note", text: "已有内容")
+            let model = AppModel(store: store)
+            await model.waitForReload()
+            model.openQuickConversation()
+            XCTAssertTrue(model.newConversationOpen)
+            XCTAssertTrue(model.conversationVisible)
+            XCTAssertNil(model.conversation)
+            XCTAssertEqual(try store.list().count, 1)
+            model.sendChat()
+            XCTAssertFalse(model.busy)
+            model.chatDraft = "未发送的问题"
+            model.closeConversation()
+            model.openQuickConversation()
+            XCTAssertEqual(model.chatDraft, "未发送的问题")
+            model.openConversation(entry)
+            model.openQuickConversation()
+            XCTAssertEqual(model.conversation?.id, entry.id)
+            XCTAssertFalse(model.newConversationOpen)
+            model.closeConversation()
+            model.openQuickConversation()
+            XCTAssertEqual(model.chatDraft, "未发送的问题")
+            XCTAssertFalse(model.canChangeSyncAccount())
+            XCTAssertEqual(try store.list().count, 1)
+        }.value
+    }
+
+    func testUntouchedQuickDraftAdoptsNewContextButAttributeChangesSurvive() async throws {
+        try await Task { @MainActor in
+            let model = AppModel(store: try Store(url: nil))
+            await model.waitForReload()
+            let first = try XCTUnwrap(TaskDates.date("2026-09-16"))
+            let second = try XCTUnwrap(TaskDates.date("2026-09-17"))
+            model.quickCreateTask(date: first)
+            XCTAssertFalse(model.taskDraftDirty)
+            model.taskCreating = false
+            model.quickCreateTask(status: "in_progress", date: second)
+            XCTAssertEqual(model.taskDraftStatus, "in_progress")
+            XCTAssertEqual(AppModel.dateKey(model.taskDraftDate), "2026-09-17")
+            XCTAssertFalse(model.taskDraftRestored)
+            model.taskDraftImportant = true
+            model.taskCreating = false
+            model.quickCreateTask(date: first)
+            XCTAssertTrue(model.taskDraftRestored)
+            XCTAssertTrue(model.taskDraftImportant)
+            XCTAssertEqual(AppModel.dateKey(model.taskDraftDate), "2026-09-17")
+        }.value
+    }
+
+    func testDueEntryMatchesOverdueAndTodayOnly() async throws {
+        try await Task { @MainActor in
+            let store = try Store(url: nil)
+            let today = AppModel.dateKey(Date())
+            _ = try store.add(kind: "todo", text: "到期", due: today)
+            _ = try store.add(kind: "todo", text: "逾期", due: "2020-01-01")
+            _ = try store.add(kind: "todo", text: "未来", due: "2099-01-01")
+            _ = try store.add(kind: "todo", text: "无日期")
+            _ = try store.add(kind: "todo", text: "完成", due: today, status: "completed")
+            let model = AppModel(store: store)
+            await model.waitForReload()
+            model.showDueTasks()
+            await model.waitForReload()
+            XCTAssertEqual(Set(model.visibleTasks.map(\.text)), ["到期", "逾期"])
+            model.switchMode(.calendar)
+            XCTAssertFalse(model.dueOnly)
+        }.value
+    }
+
+    func testDateLabelsAvoidUrgencyForCompletedTasks() throws {
+        let today = try XCTUnwrap(TaskDates.date("2026-09-13"))
+        XCTAssertEqual(TaskDates.taskLabel("2026-09-13", today: today), "今天")
+        XCTAssertEqual(TaskDates.taskLabel("2026-09-14", today: today), "明天")
+        XCTAssertEqual(TaskDates.taskLabel("2026-09-12", today: today), "已逾期 · 9月12日")
+        XCTAssertEqual(TaskDates.taskLabel("2026-09-12", completed: true, today: today), "9月12日")
+        XCTAssertEqual(TaskDates.taskLabel("2027-01-01", today: today), "2027年1月1日")
+    }
+
+    func testQuickEntryUsesContextAndPreservesExistingDraft() async throws {
+        try await Task { @MainActor in
+            let store = try Store(url: nil)
+            let model = AppModel(store: store)
+            await model.waitForReload()
+            model.switchMode(.board)
+            model.importantOnly = true
+            model.quickCreateTask(status: "in_progress")
+            XCTAssertTrue(model.taskCreating)
+            XCTAssertEqual(model.taskDraftStatus, "in_progress")
+            XCTAssertFalse(model.taskDraftHasDue)
+            XCTAssertTrue(model.taskDraftImportant)
+            model.taskDraft = "继续处理"
+            model.taskCreating = false
+            let date = try XCTUnwrap(TaskDates.date("2026-12-31"))
+            model.quickCreateTask(status: "completed", date: date)
+            XCTAssertEqual(model.taskDraftStatus, "in_progress")
+            XCTAssertFalse(model.taskDraftHasDue)
+            XCTAssertEqual(model.taskDraft, "继续处理")
+            model.saveNewTask()
+            await model.waitForReload()
+            model.switchMode(.calendar)
+            model.quickCreateTask(date: date)
+            XCTAssertEqual(AppModel.dateKey(model.taskDraftDate), "2026-12-31")
+            XCTAssertTrue(model.taskDraftHasDue)
+            model.taskDraft = "当天任务"
+            model.saveNewTask()
+            await model.waitForReload()
+            XCTAssertEqual(try store.todos(status: "all").first { $0.text == "当天任务" }?.due, "2026-12-31")
+            model.quickCreateTask()
+            XCTAssertFalse(model.taskDraftHasDue)
+            model.taskCreating = false
+            model.settings = true
+            model.quickCreateTask()
+            XCTAssertFalse(model.taskCreating)
+        }.value
+    }
+
     func testNewContentIsVisibleAfterSavingFromSearchAndImportantFilter() async throws {
         try await Task { @MainActor in
             let model = AppModel(store: try Store(url: nil))

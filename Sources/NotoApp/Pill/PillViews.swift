@@ -1,4 +1,4 @@
-// 屏幕边缘的界面与数据：通透或纯黑的贴边凸舌，悬停展开出「今日任务」环和「写一笔」，
+// 屏幕边缘的界面与数据：通透或纯黑的贴边凸舌，悬停展开出「到期待办」环和「写一笔」，
 // 再悬停到具体元素时弹出带箭头的描述卡。视觉语言对齐 codenotch 的刘海。
 //
 // 动效质感的关键：窗口尺寸恒定，展开/收起是剪影在窗口内的形变，
@@ -34,7 +34,7 @@ final class PillModel: ObservableObject {
     var hasCard: Bool { hovered == .today || hovered == .compose }
     @Published var hovered: PillElement?
     @Published var edge: PillEdge = .right
-    // 今日任务数据
+    // 到期待办数据
     @Published private(set) var todayOpen = 0
     @Published private(set) var todayDone = 0
     @Published private(set) var overdue = 0
@@ -47,24 +47,10 @@ final class PillModel: ObservableObject {
     private var lastDay: String?
     private var refreshTask: Task<Void, Never>?
 
-    /// 环的进度 = 今日到期里未完成的占比；颜色随负担从绿到红。
-    var todayFraction: CGFloat {
-        guard todayOpen + todayDone > 0 else { return 0 }
-        return CGFloat(todayOpen) / CGFloat(todayOpen + todayDone)
-    }
-
     func cardHeight(for element: PillElement) -> CGFloat {
         guard element == .today else { return 80 }
-        guard todayOpen + todayDone > 0 else { return 100 }
+        guard todayOpen > 0 else { return 100 }
         return 112 + CGFloat(min(todayItems.count, 3)) * 18 + (todayItems.count > 3 ? 16 : 0)
-    }
-
-    var ringColor: Color {
-        switch todayFraction {
-        case ..<0.5: Color(red: 0.19, green: 0.82, blue: 0.35)
-        case ..<0.85: Color(red: 1.0, green: 0.84, blue: 0.04)
-        default: Color(red: 1.0, green: 0.27, blue: 0.23)
-        }
     }
 
     /// 按数据版本和本地日期刷新，跨午夜也会更新到期状态。
@@ -263,7 +249,7 @@ struct NotchSilhouette: Shape {
     }
 }
 
-/// 展开态的主体内容：今日任务环、写一笔、设置。
+/// 展开态的主体内容：到期待办环、写一笔、设置。
 struct PillBarView: View {
     @ObservedObject var model: PillModel
     var body: some View {
@@ -274,8 +260,7 @@ struct PillBarView: View {
                         ZStack {
                             Circle().stroke(Color.primary.opacity(0.16), lineWidth: 4.66)
                             if element == .today {
-                                Circle().trim(from: 0, to: model.todayFraction)
-                                    .stroke(model.ringColor, style: StrokeStyle(lineWidth: 2.4, lineCap: .round)).rotationEffect(.degrees(-90))
+                                Circle().stroke(model.todayOpen > 0 ? (model.overdue > 0 ? Color.orange : Color.accentColor) : Color.clear, lineWidth: 2.4)
                             }
                             Image(systemName: element == .today ? "checklist" : "square.and.pencil")
                                 .font(.system(size: 13.8, weight: .regular)).foregroundStyle(.primary)
@@ -286,7 +271,7 @@ struct PillBarView: View {
                     .frame(width: model.edge.isVertical ? PillMetrics.depth(for: model.edge) : 44,
                            height: model.edge.isVertical ? PillMetrics.cell : PillMetrics.depth(for: model.edge), alignment: .top)
                 }.buttonStyle(.plain)
-                    .accessibilityLabel(element == .today ? "今日任务，未完成 \(model.todayOpen) 项" : "新建记录")
+                    .accessibilityLabel(element == .today ? "到期待办，未完成 \(model.todayOpen) 项" : "新建记录")
                     .offset(x: model.edge.isVertical ? 0 : element.originAlong(for: model.edge) - PillController.bodyStart,
                             y: model.edge.isVertical ? element.originAlong(for: model.edge) - PillController.bodyStart : (PillMetrics.depth(for: model.edge) - PillMetrics.cell) / 2)
             }
@@ -330,43 +315,34 @@ private struct PillCardView: View {
         case .today:
             HStack(spacing: 6) {
                 Image(systemName: "checklist").font(.system(size: 9.5, weight: .medium))
-                Text("今日任务").font(.system(size: 13.7, weight: .semibold))
+                Text("到期待办").font(.system(size: 13.7, weight: .semibold))
                 Spacer(minLength: 0)
             }.foregroundStyle(Color.primary.opacity(0.88))
-            if model.todayOpen + model.todayDone == 0 {
-                Text("今天没有到期任务。")
-                    .font(.system(size: 9.5)).foregroundStyle(Color.primary.opacity(0.55)).lineSpacing(3)
+            if model.todayOpen == 0 {
+                Text("暂无到期待办。")
+                    .font(.system(size: 11)).foregroundStyle(Color.primary.opacity(0.55)).lineSpacing(3)
             } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(Color.primary.opacity(0.08))
-                            Capsule().fill(model.ringColor)
-                                .frame(width: max(4, geo.size.width * model.todayFraction))
-                        }
-                    }.frame(height: 4)
-                    HStack {
-                        Text("未完成 \(model.todayOpen)").font(.system(size: 9.5)).foregroundStyle(Color.primary.opacity(0.7))
-                        Spacer()
-                        Text("已完成 \(model.todayDone)").font(.system(size: 9.5)).foregroundStyle(Color.primary.opacity(0.45))
-                    }
-                }
+                HStack {
+                    Text("未完成 \(model.todayOpen)")
+                    Spacer()
+                    if model.overdue > 0 { Text("逾期 \(model.overdue)").foregroundStyle(.orange) }
+                }.font(.system(size: 11)).foregroundStyle(.secondary)
                 ForEach(model.todayItems.prefix(3)) { entry in
                     HStack(alignment: .top, spacing: 6) {
                         Circle().fill((entry.due ?? "") < AppModel.dateKey(Date()) ? Color.orange : Color.primary.opacity(0.3))
                             .frame(width: 4, height: 4).padding(.top, 4)
-                        Text(entry.text).font(.system(size: 9.5)).foregroundStyle(Color.primary.opacity(0.85))
+                        Text(entry.text).font(.system(size: 11)).foregroundStyle(Color.primary.opacity(0.85))
                             .lineLimit(1)
                         Spacer(minLength: 0)
                     }
                 }
                 if model.todayItems.count > 3 {
                     Text("还有 \(model.todayItems.count - 3) 项…")
-                        .font(.system(size: 9.5)).foregroundStyle(Color.primary.opacity(0.45))
+                        .font(.system(size: 11)).foregroundStyle(Color.primary.opacity(0.45))
                 }
             }
             Spacer(minLength: 0)
-            Text("查看任务").font(.system(size: 9.5)).foregroundStyle(Color.primary.opacity(0.4))
+            Text("查看任务").font(.system(size: 11)).foregroundStyle(Color.primary.opacity(0.4))
         case .compose:
             HStack(spacing: 6) {
                 Image(systemName: "square.and.pencil").font(.system(size: 9.5, weight: .medium))
@@ -374,9 +350,9 @@ private struct PillCardView: View {
                 Spacer(minLength: 0)
             }.foregroundStyle(Color.primary.opacity(0.88))
             Text("记下想法或任务。")
-                .font(.system(size: 9.5)).foregroundStyle(Color.primary.opacity(0.65)).lineSpacing(4)
+                .font(.system(size: 11)).foregroundStyle(Color.primary.opacity(0.65)).lineSpacing(4)
             Spacer(minLength: 0)
-            Text("点击新建记录").font(.system(size: 9.5)).foregroundStyle(Color.primary.opacity(0.4))
+            Text("点击新建记录").font(.system(size: 11)).foregroundStyle(Color.primary.opacity(0.4))
         case .settings, .move:
             EmptyView()
         }
