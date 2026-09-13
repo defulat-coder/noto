@@ -41,18 +41,10 @@ struct SidebarBadge: View {
     }
 }
 
-private enum SettingsSection: String, CaseIterable {
-    case account = "账号与同步", ai = "AI", appearance = "外观"
-    var icon: String {
-        switch self { case .account: "person.crop.circle"; case .ai: "sparkles"; case .appearance: "slider.horizontal.3" }
-    }
-}
-
 struct SettingsView: View {
     @ObservedObject var model: AppModel
-    @State private var section = SettingsSection.account
     @State private var showDeleted = false
-    @Namespace private var navigationSelection
+    @State private var accountExpanded = false
     @AppStorage("pillEnabled") private var pillEnabled = true
     @AppStorage("pillEdge") private var pillEdge = PillEdge.right.rawValue
     @AppStorage("pillSurface") private var pillSurface = "glass"
@@ -63,108 +55,124 @@ struct SettingsView: View {
             else { pillVisibility = value; pillEnabled = true }
         })
     }
+    private var accountSummary: String {
+        if model.preview { return "示例空间" }
+        return model.sync?.isSignedIn == true ? (model.sync?.email ?? "已登录") : "仅本机"
+    }
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("设置").font(.system(size: 15, weight: .semibold)).padding(.horizontal, 8).padding(.vertical, 20)
-                ForEach(SettingsSection.allCases, id: \.self) { item in
-                    Button { section = item } label: {
-                        HStack(spacing: 8) {
-                            SidebarBadge(symbol: item.icon)
-                            Text(item.rawValue)
-                            Spacer(minLength: 0)
-                        }.padding(.horizontal, 8).frame(height: 40)
-                            .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                            .background {
-                                if section == item {
-                                    RoundedRectangle(cornerRadius: 7).fill(Color.accentColor.opacity(0.10))
-                                        .matchedGeometryEffect(id: "settings", in: navigationSelection).allowsHitTesting(false)
-                                }
-                            }
-                    }.buttonStyle(NavigationButtonStyle()).accessibilityAddTraits(section == item ? .isSelected : [])
-                }
+        VStack(spacing: 0) {
+            HStack {
+                Text("设置").font(.system(size: 16, weight: .semibold))
                 Spacer()
-            }.font(.system(size: 13)).animation(NotoMotion.animation(.navigation), value: section).padding(.horizontal, 8).frame(width: 152)
-                .padding(4)
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    Text(section.rawValue).font(.system(size: 15, weight: .semibold))
-                    Spacer()
-                    Button { model.settings = false } label: { ActionIcon("xmark") }
-                        .help("关闭设置").accessibilityLabel("关闭设置").disabled(model.sync?.isSyncing == true)
-                }.padding(20)
-                ScrollView {
-                    ZStack(alignment: .topLeading) {
-                    VStack(alignment: .leading, spacing: 20) {
-                        switch section {
-                        case .account:
-                            settingsGroup {
-                                if let sync = model.sync { SyncSettingsView(model: model, controller: sync) }
-                                else { Label("预览模式不连接同步服务", systemImage: "internaldrive").foregroundStyle(.secondary) }
-                            }
-                            settingsGroup {
-                                HStack {
-                                    Label("最近删除", systemImage: "trash")
-                                    Spacer()
-                                    Button("查看") { showDeleted = true }.accessibilityLabel("查看最近删除")
+                Button("完成") { model.settings = false }
+                    .help("关闭设置").accessibilityLabel("关闭设置")
+                    .disabled(model.sync?.isSyncing == true)
+            }.padding(.horizontal, 40).padding(.vertical, 20)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    appearancePage
+                    settingsGroup {
+                        HStack(spacing: 12) {
+                            Text("AI 工具").font(.system(size: 13, weight: .medium))
+                            Spacer(minLength: 8)
+                            Picker("AI 工具", selection: $model.provider) {
+                                ForEach(Provider.allCases) { provider in
+                                    Label { Text(provider.title) } icon: { Image(nsImage: provider.settingsIcon) }.tag(provider)
                                 }
-                            }
-                        case .ai:
-                            settingsGroup {
-                                Picker("工具", selection: $model.provider) {
-                                    ForEach(Provider.allCases) { provider in Text(provider.title).tag(provider) }
+                            }.labelsHidden().pickerStyle(.menu).fixedSize().frame(width: 216, alignment: .trailing)
+                                .help("下一次对话生效，已有对话保留原工具。")
+                        }.frame(minHeight: 36)
+                    }
+                    VStack(spacing: 4) {
+                        Button { accountExpanded.toggle() } label: {
+                            HStack(spacing: 10) {
+                                Text("账号与同步").font(.system(size: 13, weight: .medium))
+                                Spacer(minLength: 8)
+                                Text(accountSummary)
+                                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                if model.sync?.lastError.isEmpty == false {
+                                    Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.orange)
+                                        .help("同步需要处理，展开查看详情")
                                 }
-                                Text("使用本机已登录的工具，下次对话生效。默认只使用当前记录，可在对话中调整内容范围。")
-                                    .font(NotoDesign.caption).foregroundStyle(.secondary)
-                            }
-                        case .appearance:
-                            settingsGroup {
-                                HStack {
-                                    Text("屏幕边缘"); Spacer()
-                                    Picker("屏幕边缘", selection: edgeVisibility) {
-                                        Text("悬停展开").tag("hover")
-                                        Text("始终展开").tag("always")
-                                        Text("隐藏").tag("hidden")
-                                    }.labelsHidden().pickerStyle(.segmented).frame(width: 240)
-                                }
-                                Color.clear.frame(height: 6)
-                                HStack {
-                                    Text("位置"); Spacer()
-                                    Picker("位置", selection: $pillEdge) {
-                                        ForEach(PillEdge.allCases) { edge in Text(edge.label).tag(edge.rawValue) }
-                                    }.labelsHidden().pickerStyle(.segmented).frame(width: 240)
-                                }
-                                Color.clear.frame(height: 6)
-                                HStack {
-                                    Text("表面"); Spacer()
-                                    Picker("表面", selection: $pillSurface) {
-                                        Text("液态玻璃").tag("glass")
-                                        Text("纯黑").tag("black")
-                                    }.labelsHidden().pickerStyle(.segmented).frame(width: 240)
-                                }
-                                HStack {
-                                    Text("拖动移动弧线可换边，⌥ 拖动可微调位置。")
-                                        .font(NotoDesign.caption).foregroundStyle(.secondary)
-                                    Spacer(minLength: 4)
-                                    Button("居中") { model.pill?.resetPosition() }.disabled(!pillEnabled)
-                                }
-                            }
-                            Text("外观跟随系统；液态玻璃也遵循系统的辅助功能设置。")
-                                .font(NotoDesign.caption).foregroundStyle(.secondary)
+                                Image(systemName: "chevron.right").font(.system(size: 10, weight: .medium))
+                                    .foregroundStyle(.secondary).rotationEffect(.degrees(accountExpanded ? 90 : 0))
+                            }.padding(.horizontal, 10).frame(height: 40).contentShape(Rectangle())
+                        }.buttonStyle(NavigationButtonStyle())
+                            .accessibilityLabel("账号与同步").accessibilityValue("\(accountSummary)，\(accountExpanded ? "已展开" : "已收起")")
+                            .accessibilityHint(model.sync?.lastError.isEmpty == false ? "同步需要处理，展开查看详情" : "")
+                        Group {
+                            if let sync = model.sync { SyncSettingsView(model: model, controller: sync) }
+                            else { Text("示例预览不连接同步服务。").font(NotoDesign.caption).foregroundStyle(.secondary) }
                         }
-                    }.padding(.horizontal, 20).padding(.bottom, 24)
-                        .id(section).transition(.opacity)
-                    }.animation(NotoMotion.animation(.navigation), value: section)
-                }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
-        }.frame(width: 620, height: 480).background(NotoGlassSurface(radius: 20)).buttonStyle(QuietButtonStyle())
+                        .padding(.horizontal, 10).padding(.bottom, accountExpanded ? 14 : 0)
+                        .frame(height: accountExpanded ? nil : 0, alignment: .top).clipped()
+                        .opacity(accountExpanded ? 1 : 0).disabled(!accountExpanded)
+                        .allowsHitTesting(accountExpanded).accessibilityHidden(!accountExpanded)
+                        Button { showDeleted = true } label: {
+                            HStack(spacing: 10) {
+                                Text("最近删除").font(.system(size: 13, weight: .medium))
+                                Spacer()
+                                Image(systemName: "chevron.right").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                            }.padding(.horizontal, 10).frame(height: 40).contentShape(Rectangle())
+                        }.buttonStyle(NavigationButtonStyle()).accessibilityLabel("查看最近删除")
+                    }.padding(6).background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 16))
+                        .animation(NotoMotion.animation(.layout), value: accountExpanded)
+                }.padding(.horizontal, 24).padding(.bottom, 24)
+            }
+        }.frame(width: 480, height: 460).background(NotoGlassSurface(radius: 20)).buttonStyle(QuietButtonStyle())
             .sheet(isPresented: $showDeleted) { RecentlyDeletedView(model: model).presentationBackground(.clear) }
             .interactiveDismissDisabled(model.sync?.isSyncing == true)
             .onExitCommand { if model.sync?.isSyncing != true { model.settings = false } }
     }
+
+    private var appearancePage: some View {
+        settingsGroup {
+            HStack {
+                Text("屏幕边缘")
+                Spacer()
+                Picker("屏幕边缘", selection: edgeVisibility) {
+                    Text("悬停展开").tag("hover")
+                    Text("常驻").tag("always")
+                    Text("隐藏").tag("hidden")
+                }.labelsHidden().pickerStyle(.segmented).fixedSize().frame(width: 216, alignment: .trailing)
+            }.frame(minHeight: 36)
+            HStack {
+                Text("位置")
+                Spacer()
+                Menu {
+                    Picker("位置", selection: $pillEdge) {
+                        ForEach(PillEdge.allCases) { edge in Text(edge.label).tag(edge.rawValue) }
+                    }.pickerStyle(.inline)
+                    Button("恢复居中") { model.pill?.resetPosition() }.disabled(!pillEnabled)
+                } label: {
+                    Text((PillEdge(rawValue: pillEdge) ?? .right).label)
+                }.fixedSize().frame(width: 216, alignment: .trailing).accessibilityLabel("边缘位置")
+            }.frame(minHeight: 36)
+            HStack {
+                Text("材质")
+                Spacer()
+                Picker("材质", selection: $pillSurface) {
+                    Text("玻璃").tag("glass")
+                    Text("纯黑").tag("black")
+                }.labelsHidden().pickerStyle(.segmented).fixedSize().frame(width: 216, alignment: .trailing)
+            }.frame(minHeight: 36)
+        }
+    }
+
     private func settingsGroup<Content: View>(@ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12, content: content)
-            .font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading).padding(14)
-            .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 14))
+            .font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading).padding(16)
+            .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+private extension Provider {
+    var settingsIcon: NSImage {
+        guard let url = Bundle.module.url(forResource: rawValue, withExtension: "png"),
+              let image = NSImage(contentsOf: url) else { return NSImage() }
+        image.size = NSSize(width: 16, height: 16)
+        image.isTemplate = true
+        return image
     }
 }

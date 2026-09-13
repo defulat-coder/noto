@@ -14,6 +14,7 @@ struct SyncSettingsView: View {
     @State private var showConfiguration = false
     @State private var showImportConfirmation = false
     @State private var showConflicts = false
+    @State private var loadedConfiguration = false
 
     private var unresolvedConflictCount: Int {
         controller.conflicts.filter { $0.reason != "已另存为新任务" }.count
@@ -21,51 +22,43 @@ struct SyncSettingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 6) {
-                Label(controller.isSignedIn ? "账号空间" : "本机空间",
-                      systemImage: controller.isSignedIn ? "person.crop.circle" : "internaldrive")
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
-                if controller.isSignedIn {
-                    Text(controller.email ?? "").textSelection(.enabled)
-                    Label(controller.status, systemImage: "arrow.triangle.2.circlepath")
-                        .accessibilityLabel("同步状态：\(controller.status)")
-                } else {
-                    Text("记录、任务和对话仅保存在这台 Mac。")
-                }
+            if controller.isSignedIn {
+                Label(controller.status, systemImage: "arrow.triangle.2.circlepath")
+                    .font(NotoDesign.caption).foregroundStyle(.secondary)
+                    .accessibilityLabel("同步状态：\(controller.status)")
             }
-            .font(NotoDesign.caption).foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
             if controller.isSignedIn { signedIn }
             else { signedOut }
-            if !error.isEmpty { errorText(error) }
             if !controller.lastError.isEmpty { errorText(controller.lastError) }
             if !model.message.isEmpty && model.isError { errorText(model.message) }
 
-            Color.clear.frame(height: 6)
-            DisclosureGroup("高级服务配置", isExpanded: $showConfiguration) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(controller.isSignedIn ? "返回本机后可更换同步服务。" : "填写部署方提供的服务地址与公开密钥，再登录账号。")
-                        .font(NotoDesign.caption).foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Supabase 地址").font(NotoDesign.caption)
-                        TextField("https://…supabase.co", text: $server)
-                            .accessibilityLabel("Supabase 地址")
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("公开密钥").font(NotoDesign.caption)
-                        TextField("Publishable / anon key", text: $publicKey)
-                            .accessibilityLabel("同步服务公开密钥")
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("PowerSync 地址").font(NotoDesign.caption)
-                        TextField("https://…powersync.journeyapps.com", text: $syncServer)
-                            .accessibilityLabel("PowerSync 地址")
-                    }
-                    Button { saveConfiguration() } label: {
-                        Label("保存服务配置", systemImage: "checkmark")
-                    }.buttonStyle(QuietButtonStyle(prominent: true))
-                }.textFieldStyle(.roundedBorder).padding(.top, 8)
-                    .disabled(controller.isSignedIn || controller.isSyncing)
+            if controller.configuration != nil || showConfiguration {
+                DisclosureGroup("连接设置", isExpanded: $showConfiguration) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(controller.isSignedIn ? "返回本机后可更换同步服务。" : "填写部署方提供的服务地址与公开密钥，再登录账号。")
+                            .font(NotoDesign.caption).foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Supabase 地址").font(NotoDesign.caption)
+                            TextField("https://…supabase.co", text: $server)
+                                .accessibilityLabel("Supabase 地址")
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("公开密钥").font(NotoDesign.caption)
+                            TextField("Publishable / anon key", text: $publicKey)
+                                .accessibilityLabel("同步服务公开密钥")
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("PowerSync 地址").font(NotoDesign.caption)
+                            TextField("https://…powersync.journeyapps.com", text: $syncServer)
+                                .accessibilityLabel("PowerSync 地址")
+                        }
+                        Button { saveConfiguration() } label: {
+                            Label("保存服务配置", systemImage: "checkmark")
+                        }.buttonStyle(QuietButtonStyle(prominent: true))
+                        if !error.isEmpty { errorText(error) }
+                    }.textFieldStyle(.roundedBorder).padding(.top, 8)
+                        .disabled(controller.isSignedIn || controller.isSyncing)
+                }
             }
         }
         .buttonStyle(QuietButtonStyle())
@@ -77,6 +70,8 @@ struct SyncSettingsView: View {
             Text("本机任务会复制到 \(controller.email ?? "当前账号") 并上传，同一账号的其他设备也能看到。本机原任务保留，记录和对话不会上传；重复导入不会创建重复任务。")
         }
         .onAppear {
+            guard !loadedConfiguration else { return }
+            loadedConfiguration = true
             server = controller.configuration?.supabaseURL.absoluteString ?? ""
             publicKey = controller.configuration?.publishableKey ?? ""
             syncServer = controller.configuration?.powerSyncURL.absoluteString ?? ""
@@ -85,14 +80,13 @@ struct SyncSettingsView: View {
 
     private var signedOut: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("登录后切换到账号空间，本机内容保留。只有任务跨设备同步。")
+            Text("登录后进入独立的账号空间，本机内容保留。只有任务会同步。")
                 .font(NotoDesign.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if controller.configuration == nil {
-                Button { showConfiguration = true } label: {
-                    Label("配置同步服务", systemImage: "slider.horizontal.3")
-                }.buttonStyle(QuietButtonStyle(prominent: true))
-                Text("使用同一账号同步多台 Mac 的任务。")
-                    .font(NotoDesign.caption).foregroundStyle(.secondary)
+                if !showConfiguration {
+                    Button("连接同步服务") { showConfiguration = true }
+                        .buttonStyle(QuietButtonStyle(prominent: true))
+                }
             } else {
                 TextField("邮箱", text: $email).textContentType(.username)
                 SecureField("密码", text: $password).textContentType(.password)

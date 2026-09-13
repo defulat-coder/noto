@@ -18,7 +18,7 @@ let package = Package(
     targets: [
         .target(name: "NotoCore", dependencies: [.product(name: "GRDB", package: "GRDB.swift")]),
         .target(name: "NotoSync", dependencies: ["NotoCore", .product(name: "PowerSync", package: "powersync-swift")]),
-        .executableTarget(name: "NotoApp", dependencies: ["NotoCore", "NotoSync"], linkerSettings: [
+        .executableTarget(name: "NotoApp", dependencies: ["NotoCore", "NotoSync"], resources: [.process("Resources")], linkerSettings: [
             .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"], .when(platforms: [.macOS]))
         ]),
         .executableTarget(name: "NotoCLI", dependencies: ["NotoCore", .product(name: "ArgumentParser", package: "swift-argument-parser")]),
