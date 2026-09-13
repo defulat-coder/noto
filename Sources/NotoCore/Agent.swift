@@ -151,14 +151,19 @@ public final class AgentRunner: @unchecked Sendable {
         process = task
         do { try task.run() } catch { process = nil; lock.unlock(); throw error }
         lock.unlock()
+        NotoLog.agent.info("agent started: provider \(provider.rawValue, privacy: .public)")
         onEvent?("已启动 \(provider.title)，等待回复")
         let timeout = DispatchWorkItem { [weak self] in self?.cancel() }
         DispatchQueue.global().asyncAfter(deadline: .now() + 150, execute: timeout)
         task.waitUntilExit(); timeout.cancel()
         lock.lock(); let wasCancelled = cancelled; process = nil; lock.unlock()
-        guard !wasCancelled else { throw NotoError("AI 操作已取消或等待超时，原始输入已保留。") }
+        guard !wasCancelled else {
+            NotoLog.agent.info("agent cancelled or timed out: provider \(provider.rawValue, privacy: .public)")
+            throw NotoError("AI 操作已取消或等待超时，原始输入已保留。")
+        }
         guard task.terminationStatus == 0 else {
             let diagnostic = (try? Self.readOutput(errors, limit: 64_000)) ?? ""
+            NotoLog.agent.error("agent failed (status \(task.terminationStatus)): \(String(diagnostic.prefix(500)), privacy: .public)")
             if diagnostic.contains("requires a newer version of Codex") {
                 throw NotoError("Codex CLI 版本过旧，无法使用当前默认模型。请更新 CLI，或在设置中选择其他 AI。")
             }

@@ -53,17 +53,17 @@ final class PillModel: ObservableObject {
         return 112 + CGFloat(min(todayItems.count, 3)) * 18 + (todayItems.count > 3 ? 16 : 0)
     }
 
-    /// 按数据版本和本地日期刷新，跨午夜也会更新到期状态。
+    /// AppModel 数据变化后主动调用；先比数据版本，版本和日期都没变就不查库。
     func refresh(force: Bool = false) {
         guard let store = controller?.appModel?.store else { return }
         let todayKey = AppModel.dateKey(Date())
         refreshTask?.cancel()
         refreshTask = Task { [weak self] in
-            let snapshot = try? await Task.detached(priority: .utility) { () -> (version: Int, todos: [Entry]) in
-                (try store.dataVersion(), try store.todos(status: "all"))
-            }.value
-            guard let self, let (version, todos) = snapshot, !Task.isCancelled else { return }
+            let version = try? await Task.detached(priority: .utility) { try store.dataVersion() }.value
+            guard let self, let version, !Task.isCancelled else { return }
             if !force, store === self.lastStore, version == self.lastVersion, todayKey == self.lastDay { return }
+            let todos = try? await Task.detached(priority: .utility) { try store.todos(status: "all") }.value
+            guard let todos, !Task.isCancelled else { return }
             self.lastStore = store
             self.lastVersion = version
             self.lastDay = todayKey

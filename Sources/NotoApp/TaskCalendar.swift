@@ -27,21 +27,25 @@ struct ImportantTaskFilter: View {
 
 /// Calendar arithmetic, never UTC parsing or fixed 24-hour intervals for date-only tasks.
 enum TaskDates {
-    static var local: Calendar { var calendar = Calendar(identifier: .gregorian); calendar.timeZone = .current; calendar.firstWeekday = 2; return calendar }
+    static let local: Calendar = { var calendar = Calendar(identifier: .gregorian); calendar.timeZone = .current; calendar.firstWeekday = 2; return calendar }()
+    // body 求值路径上的 formatter 必须缓存：DateFormatter 创建是毫秒级开销，且这些方法按行调用。
+    private static let monthDayFormatter: DateFormatter = { let formatter = DateFormatter(); formatter.calendar = local; formatter.dateFormat = "M月d日"; return formatter }()
+    private static let fullDateFormatter: DateFormatter = { let formatter = DateFormatter(); formatter.calendar = local; formatter.dateFormat = "yyyy年M月d日"; return formatter }()
+    private static let monthFormatter: DateFormatter = { let formatter = DateFormatter(); formatter.calendar = local; formatter.dateFormat = "yyyy年M月"; return formatter }()
+    private static let weekdayFormatter: DateFormatter = { let formatter = DateFormatter(); formatter.calendar = local; formatter.locale = Locale(identifier: "zh_CN"); formatter.dateFormat = "EEEE"; return formatter }()
     static func taskLabel(_ key: String, completed: Bool = false, today: Date = Date()) -> String {
         guard let value = date(key) else { return key }
-        let formatter = DateFormatter(); formatter.calendar = local
-        formatter.dateFormat = local.isDate(value, equalTo: today, toGranularity: .year) ? "M月d日" : "yyyy年M月d日"
+        let formatter = local.isDate(value, equalTo: today, toGranularity: .year) ? monthDayFormatter : fullDateFormatter
         if completed { return formatter.string(from: value) }
         if local.isDate(value, inSameDayAs: today) { return "今天" }
         if let tomorrow = local.date(byAdding: .day, value: 1, to: today), local.isDate(value, inSameDayAs: tomorrow) { return "明天" }
         return value < local.startOfDay(for: today) ? "已逾期 · " + formatter.string(from: value) : formatter.string(from: value)
     }
     @MainActor static func dayHeading(_ date: Date) -> String {
-        let formatter = DateFormatter(); formatter.calendar = local; formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "EEEE"
-        return taskLabel(AppModel.dateKey(date), completed: date < local.startOfDay(for: Date())) + " · " + formatter.string(from: date)
+        taskLabel(AppModel.dateKey(date), completed: date < local.startOfDay(for: Date())) + " · " + weekdayFormatter.string(from: date)
     }
+    static func monthLabel(_ date: Date) -> String { monthFormatter.string(from: date) }
+    static func monthDayFormat(_ date: Date) -> String { monthDayFormatter.string(from: date) }
     static func date(_ key: String, calendar: Calendar = local) -> Date? {
         let parts = key.split(separator: "-").compactMap { Int($0) }
         guard key.count == 10, parts.count == 3,
@@ -66,51 +70,13 @@ enum TaskDates {
     }
 }
 
-extension AppModel {
-    var calendarTasks: [Entry] {
-        if let cachedCalendarTasks { return cachedCalendarTasks }
-        let result = visibleTasks.sorted {
-            if $0.completed != $1.completed { return !$0.completed }
-            if $0.priority != $1.priority { return $0.priority == "important" }
-            return $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt > $1.createdAt
-        }
-        cachedCalendarTasks = result
-        return result
-    }
-    var calendarGroups: [String: [Entry]] {
-        if let cachedCalendarGroups { return cachedCalendarGroups }
-        let result = Dictionary(grouping: calendarTasks, by: { $0.due ?? "" })
-        cachedCalendarGroups = result
-        return result
-    }
-    var calendarDetailTasks: [Entry] { calendarGroups[calendarUnscheduled ? "" : Self.dateKey(selectedCalendarDate)] ?? [] }
-    func selectCalendarDate(_ date: Date) {
-        guard leaveUnchangedEditor() else { return }
-        selectedCalendarDate = date; calendarUnscheduled = false
-    }
-    func moveCalendarMonth(_ offset: Int) { selectCalendarDate(TaskDates.movingMonth(offset, from: selectedCalendarDate)) }
-    func showUnscheduled() { guard leaveUnchangedEditor() else { return }; calendarUnscheduled = true }
-    @discardableResult
-    func rescheduleTask(_ entry: Entry, due: String?) -> Bool {
-        guard due == nil || TaskDates.date(due!) != nil else { return false }
-        guard changeTask(entry, due: due, clearDue: due == nil) else { return false }
-        if let due, let date = TaskDates.date(due) { selectedCalendarDate = date; calendarUnscheduled = false }
-        else { calendarUnscheduled = true }
-        highlightedTaskID = entry.id
-        return true
-    }
-}
-
 struct TaskCalendar: View {
     @ObservedObject var model: AppModel
     @State private var completedExpanded = false
     @State private var occupied: [CGRect] = []
     private var searching: Bool { !model.search.isEmpty }
     private var displayed: [Entry] { searching ? model.calendarTasks : model.calendarDetailTasks }
-    private var monthLabel: String {
-        let formatter = DateFormatter(); formatter.calendar = TaskDates.local; formatter.dateFormat = "yyyy年M月"
-        return formatter.string(from: model.selectedCalendarDate)
-    }
+    private var monthLabel: String { TaskDates.monthLabel(model.selectedCalendarDate) }
     var body: some View {
         GeometryReader { geometry in
             VStack(alignment: .leading, spacing: 12) {
@@ -192,7 +158,7 @@ struct TaskCalendar: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .coordinateSpace(name: "calendar-details")
-        .onPreferenceChange(OccupiedAreas.self) { occupied = $0 }
+        .onPreferenceChange(OccupiedAreas.self) { if $0 != occupied { occupied = $0 } }
         .background(BlankClickObserver(excluded: occupied, floatingRect: nil,
             onDoubleClick: { _ in
                 model.quickCreateTask(date: searching || model.calendarUnscheduled ? nil : model.selectedCalendarDate)

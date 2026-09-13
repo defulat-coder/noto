@@ -51,12 +51,8 @@ struct RecentlyDeletedView: View {
             .task(id: model.store.map(ObjectIdentifier.init)) { await reload() }
     }
     @MainActor private func reload() async {
-        guard let store = model.store else { loading = false; return }
-        do {
-            let result = try await Task.detached { try store.deletedTodos() }.value
-            guard !Task.isCancelled, store === model.store else { return }
-            entries = result; loading = false
-        } catch { self.error = error.localizedDescription; loading = false }
+        entries = await model.deletedTasks()
+        loading = false
     }
     private func restore(_ entry: Entry) {
         guard !model.busy else { return }

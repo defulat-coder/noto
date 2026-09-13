@@ -1,63 +1,20 @@
 import Foundation
 import GRDB
 
-public enum TodoStatus: String, Codable, CaseIterable, Sendable {
-    case pending, inProgress = "in_progress", completed
-    public var label: String {
-        switch self { case .pending: "待开始"; case .inProgress: "进行中"; case .completed: "已完成" }
-    }
-}
-
-public enum TodoPriority: String, Codable, CaseIterable, Sendable {
-    case normal, important
-}
-
-public struct Entry: Codable, FetchableRecord, PersistableRecord, Identifiable, Equatable, Sendable {
-    public static let databaseTableName = "entries"
-    public var id: String
-    public var kind: String
-    public var text: String
-    public var due: String?
-    public var completed: Bool
-    public var status: String?
-    public var priority: String?
-    public var completedAt: Date?
-    public var createdAt: Date
-    public var updatedAt: Date
-    public var hasConversation: Bool = false
-
-    public init(id: String = UUID().uuidString.lowercased(), kind: String, text: String, due: String? = nil, completed: Bool = false, createdAt: Date = Date(), status: String? = nil, priority: String? = nil) {
-        self.id = id; self.kind = kind; self.text = text; self.due = due
-        self.status = kind == "todo" ? (status ?? (completed ? "completed" : "pending")) : status
-        self.priority = kind == "todo" ? (priority ?? "normal") : priority
-        self.completed = self.status == "completed"
-        self.completedAt = self.completed ? createdAt : nil
-        self.createdAt = createdAt; self.updatedAt = createdAt
-    }
-}
-
-public struct ChatMessage: Codable, FetchableRecord, PersistableRecord, Identifiable, Equatable, Sendable {
-    public static let databaseTableName = "messages"
-    public var id: Int64?
-    public var entryID: String
-    public var role: String
-    public var text: String
-    public var createdAt: Date = Date()
-    public var execution: String? = nil
-}
-
-public struct NotoError: LocalizedError {
-    public let message: String
-    public init(_ message: String) { self.message = message }
-    public var errorDescription: String? { message }
-}
+// 持久化与业务操作：GRDB 打开、迁移、增改查、AI actions 原子应用、undo。
+// 模型类型（Entry/ChatMessage/TodoStatus 等）在 Models.swift；
+// 同步 outbox 的落库在 SyncStore.swift，传输在 NotoSync。
 
 public final class Store: @unchecked Sendable {
     let db: any DatabaseWriter
     public let storageURL: URL?
+    /// CLI/App 共享的账号库指针文件：NotoSync 登录后写入，Store.defaultURL 读取。
+    public static var activeAccountPointer: URL {
+        localURL.deletingLastPathComponent().appendingPathComponent("active-account.json")
+    }
     public static var defaultURL: URL {
         if let path = ProcessInfo.processInfo.environment["NOTO_DATABASE"] { return URL(fileURLWithPath: path) }
-        let pointer = localURL.deletingLastPathComponent().appendingPathComponent("active-account.json")
+        let pointer = activeAccountPointer
         if let data = try? Data(contentsOf: pointer), let path = try? JSONDecoder().decode(String.self, from: data) {
             let url = URL(fileURLWithPath: path).standardizedFileURL
             let root = localURL.deletingLastPathComponent().appendingPathComponent("accounts").standardizedFileURL.path + "/"
@@ -66,7 +23,7 @@ public final class Store: @unchecked Sendable {
         return localURL
     }
 
-    public init(url: URL? = Store.defaultURL, busyTimeout: TimeInterval = 5) throws {
+    public init(url: URL? = Store.defaultURL, busyTimeout: TimeInterval = 1) throws {
         storageURL = url?.standardizedFileURL
         if let url {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -117,6 +74,35 @@ public final class Store: @unchecked Sendable {
             try db.execute(sql: "CREATE INDEX entries_tasks ON entries(kind, status, priority, due)")
         }
         Self.registerSyncMigration(&migrator)
+        migrator.registerMigration("v7_search_fts") { db in
+            // trigram 分词支撑中英文子串匹配（原 instr 语义），并让搜索走索引。
+            try db.execute(sql: "CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(text, due, content='entries', content_rowid='rowid', tokenize='trigram')")
+            try db.execute(sql: "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(text, content='messages', content_rowid='id', tokenize='trigram')")
+            try db.execute(sql: """
+                CREATE TRIGGER IF NOT EXISTS entries_fts_ai AFTER INSERT ON entries BEGIN
+                  INSERT INTO entries_fts(rowid, text, due) VALUES (new.rowid, new.text, COALESCE(new.due, ''));
+                END;
+                CREATE TRIGGER IF NOT EXISTS entries_fts_ad AFTER DELETE ON entries BEGIN
+                  INSERT INTO entries_fts(entries_fts, rowid, text, due) VALUES ('delete', old.rowid, old.text, COALESCE(old.due, ''));
+                END;
+                CREATE TRIGGER IF NOT EXISTS entries_fts_au AFTER UPDATE ON entries BEGIN
+                  INSERT INTO entries_fts(entries_fts, rowid, text, due) VALUES ('delete', old.rowid, old.text, COALESCE(old.due, ''));
+                  INSERT INTO entries_fts(rowid, text, due) VALUES (new.rowid, new.text, COALESCE(new.due, ''));
+                END;
+                CREATE TRIGGER IF NOT EXISTS messages_fts_ai AFTER INSERT ON messages BEGIN
+                  INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
+                END;
+                CREATE TRIGGER IF NOT EXISTS messages_fts_ad AFTER DELETE ON messages BEGIN
+                  INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', old.id, old.text);
+                END;
+                CREATE TRIGGER IF NOT EXISTS messages_fts_au AFTER UPDATE ON messages BEGIN
+                  INSERT INTO messages_fts(messages_fts, rowid, text) VALUES ('delete', old.id, old.text);
+                  INSERT INTO messages_fts(rowid, text) VALUES (new.id, new.text);
+                END;
+                """)
+            try db.execute(sql: "INSERT INTO entries_fts(entries_fts) VALUES ('rebuild')")
+            try db.execute(sql: "INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
+        }
         try migrator.migrate(db)
     }
 
@@ -154,6 +140,19 @@ public final class Store: @unchecked Sendable {
         try change(id: id, text: text, noteOnly: true)
     }
 
+    /// 子串搜索：≥3 个字符走 trigram FTS 索引（中英文子串均可），更短的查询回退 instr 全表扫描。
+    private static func searchFilter(_ search: String) -> (sql: String, arguments: [String]) {
+        if search.count >= 3 {
+            let phrase = "\"" + search.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            return (sql: """
+                (entries.rowid IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?)
+                 OR EXISTS (SELECT 1 FROM messages WHERE messages.entryID = entries.id
+                            AND messages.id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)))
+                """, arguments: [phrase, phrase])
+        }
+        return (sql: "(instr(lower(entries.text), lower(?)) > 0 OR instr(COALESCE(due, ''), ?) > 0 OR EXISTS (SELECT 1 FROM messages WHERE messages.entryID = entries.id AND instr(lower(messages.text), lower(?)) > 0))", arguments: [search, search, search])
+    }
+
     /// Independent of the timeline's 40-row window; searches full task conversations.
     // ponytail: fetch matching tasks for column counts; move completed paging into SQL if large archives slow refresh.
     public func todos(search: String = "", status: String = "all", priority: String? = nil) throws -> [Entry] {
@@ -165,7 +164,8 @@ public final class Store: @unchecked Sendable {
             else if status != "all" { query = query.filter(Column("status") == status) }
             if let priority { query = query.filter(Column("priority") == priority) }
             if !search.isEmpty {
-                query = query.filter(sql: "instr(lower(entries.text), lower(?)) > 0 OR instr(COALESCE(due, ''), ?) > 0 OR EXISTS (SELECT 1 FROM messages WHERE messages.entryID = entries.id AND instr(lower(messages.text), lower(?)) > 0)", arguments: [search, search, search])
+                let filter = Self.searchFilter(search)
+                query = query.filter(sql: filter.sql, arguments: StatementArguments(filter.arguments))
             }
             return try query.order(sql: "CASE status WHEN 'pending' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END, CASE WHEN status = 'completed' THEN completedAt END DESC, CASE WHEN status != 'completed' THEN priority = 'important' END DESC, CASE WHEN status != 'completed' THEN due IS NULL END ASC, CASE WHEN status != 'completed' THEN due END ASC, createdAt DESC, id ASC").fetchAll(db)
         }
@@ -185,7 +185,8 @@ public final class Store: @unchecked Sendable {
                 query = query.filter(Column("createdAt") < before.createdAt || (Column("createdAt") == before.createdAt && Column("id") > before.id))
             }
             if !search.isEmpty {
-                query = query.filter(sql: "instr(lower(entries.text), lower(?)) > 0 OR instr(COALESCE(due, ''), ?) > 0 OR EXISTS (SELECT 1 FROM messages WHERE messages.entryID = entries.id AND instr(lower(messages.text), lower(?)) > 0)", arguments: [search, search, search])
+                let filter = Self.searchFilter(search)
+                query = query.filter(sql: filter.sql, arguments: StatementArguments(filter.arguments))
             }
             let rows = try query.order(Column("createdAt").desc, Column("id")).limit(limit + 1).fetchAll(db)
             return Page(entries: Array(rows.prefix(limit)), hasMore: rows.count > limit)
@@ -379,23 +380,4 @@ public final class Store: @unchecked Sendable {
             guard entry.kind == "todo" else { throw NotoError("只有待办可以设置日期。") }
         }
     }
-}
-
-public struct AIAction: Codable, Sendable {
-    public var operation: String
-    public var id: String?
-    public var text: String?
-    public var due: String?
-    public var status: String?
-    public var priority: String?
-    public var clearDue: Bool?
-    public init(operation: String, id: String? = nil, text: String? = nil, due: String? = nil, status: String? = nil, priority: String? = nil, clearDue: Bool? = nil) {
-        self.status = status; self.priority = priority; self.clearDue = clearDue
-        self.operation = operation; self.id = id; self.text = text; self.due = due
-    }
-}
-
-public struct AIResponse: Codable, Sendable {
-    public var message: String
-    public var actions: [AIAction]
 }

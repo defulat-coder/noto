@@ -4,6 +4,9 @@ import NotoCore
 
 @MainActor
 public final class SyncController: ObservableObject {
+    static let activeInterval: Duration = .seconds(2)
+    static let idleInterval: Duration = .seconds(15)
+    static let maxBackoff: Duration = .seconds(60)
     @Published public private(set) var store: Store
     @Published public private(set) var email: String?
     @Published public private(set) var status = "仅保存在本机"
@@ -22,6 +25,7 @@ public final class SyncController: ObservableObject {
     private var restored = false
     private var downloadedRevisions: [String: Int64] = [:]
     private var downloadedConflicts: Set<String> = []
+    private var backoff: Duration = SyncController.activeInterval
 
     public init(localStore: Store) {
         self.localStore = localStore; self.store = localStore
@@ -43,7 +47,10 @@ public final class SyncController: ObservableObject {
             try configuration.validate()
             let auth = SupabaseAuth(configuration: configuration)
             if let session = try await auth.restore() { try await activate(session, auth: auth, configuration: configuration) }
-        } catch { lastError = error.localizedDescription; status = "登录状态恢复失败，本机数据未变" }
+        } catch {
+            NotoLog.sync.error("restore session failed: \(error.localizedDescription, privacy: .public)")
+            lastError = error.localizedDescription; status = "登录状态恢复失败，本机数据未变"
+        }
     }
 
     public func signIn(email: String, password: String) async {
@@ -56,7 +63,10 @@ public final class SyncController: ObservableObject {
             let auth = SupabaseAuth(configuration: configuration)
             let session = try await auth.signIn(email: email.trimmingCharacters(in: .whitespacesAndNewlines), password: password)
             try await activate(session, auth: auth, configuration: configuration)
-        } catch { lastError = error.localizedDescription; status = "登录未完成，本机数据未变" }
+        } catch {
+            NotoLog.sync.error("sign in failed: \(error.localizedDescription, privacy: .public)")
+            lastError = error.localizedDescription; status = "登录未完成，本机数据未变"
+        }
     }
 
     private func activate(_ session: UserSession, auth: SupabaseAuth, configuration: SyncConfiguration) async throws {
@@ -64,7 +74,7 @@ public final class SyncController: ObservableObject {
             .appendingPathComponent(configuration.identity).appendingPathComponent(session.user.id.lowercased())
         let accountURL = accountDirectory.appendingPathComponent("notes.sqlite")
         let accountStore = try await Task.detached(priority: .userInitiated) {
-            let value = try Store(url: accountURL, busyTimeout: 0.1)
+            let value = try Store(url: accountURL, busyTimeout: 1)
             try value.enableSync(accountID: session.user.id)
             return value
         }.value
@@ -77,14 +87,29 @@ public final class SyncController: ObservableObject {
         self.store = accountStore; email = session.user.email ?? session.user.id
         pendingCount = try accountStore.pendingMutationCount(); conflicts = try accountStore.syncConflicts()
         try Self.selectCLIStore(accountURL)
+        NotoLog.sync.info("account activated (pending: \(self.pendingCount))")
         status = "已打开账号数据，正在连接同步服务…"
+        backoff = Self.activeInterval
         loop?.cancel()
         loop = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.syncNow()
-                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                // 有待传或初次下载中保持高频；空闲降频；失败指数退避。
+                let wait = await self?.pollInterval() ?? Self.idleInterval
+                do { try await Task.sleep(for: wait) } catch { return }
             }
         }
+    }
+
+    private func pollInterval() -> Duration {
+        if backoff > Self.activeInterval { return backoff }
+        if pendingCount > 0 || replica?.hasSynced != true { return Self.activeInterval }
+        return Self.idleInterval
+    }
+
+    /// 本地写入后的即时上传：进行中的同步不受影响，其余由 isSyncing 闸门去重。
+    public func kick() {
+        Task { await self.syncNow() }
     }
 
     public func signOut() async {
@@ -100,7 +125,11 @@ public final class SyncController: ObservableObject {
             try Self.selectCLIStore(nil)
             replica = nil; auth = nil; email = nil; store = localStore
             conflicts = []; pendingCount = 0; lastError = ""; status = "已退出；账号离线数据保留在独立目录"
-        } catch { lastError = error.localizedDescription; status = "退出未完成，请重试" }
+            NotoLog.sync.info("signed out")
+        } catch {
+            NotoLog.sync.error("sign out failed: \(error.localizedDescription, privacy: .public)")
+            lastError = error.localizedDescription; status = "退出未完成，请重试"
+        }
     }
 
     public func syncNow() async {
@@ -112,7 +141,8 @@ public final class SyncController: ObservableObject {
             if version == generation {
                 if dataChanged {
                     dataRevision += 1
-                    conflicts = (try? target.syncConflicts()) ?? conflicts
+                    let fetched = (try? target.syncConflicts()) ?? conflicts
+                    if fetched.map(\.id) != conflicts.map(\.id) { conflicts = fetched }
                 }
                 isSyncing = false
             }
@@ -130,6 +160,7 @@ public final class SyncController: ObservableObject {
                 dataChanged = true
                 downloadedRevisions.removeValue(forKey: mutation.entryID)
             }
+            if !mutations.isEmpty { NotoLog.sync.info("uploaded \(mutations.count) mutations") }
             let tasks = try await replica.readTasks().filter { downloadedRevisions[$0.id] != $0.revision }
             let remoteConflicts = try await replica.readConflicts().filter { !downloadedConflicts.contains($0.id) }
             guard version == generation else { return }
@@ -142,15 +173,22 @@ public final class SyncController: ObservableObject {
             guard version == generation else { return }
             if counts.0 == 0 { for task in tasks { downloadedRevisions[task.id] = task.revision } }
             downloadedConflicts.formUnion(remoteConflicts.map(\.id))
-            pendingCount = counts.0; conflicts = counts.1; lastError = ""
-            if !replica.isConnected { status = "本机已保存，等待同步连接" }
-            else if !replica.hasSynced { status = "正在下载账号数据…" }
-            else if pendingCount > 0 { status = "还有 \(pendingCount) 项修改待上传" }
-            else { status = "已同步" }
+            backoff = Self.activeInterval
+            if pendingCount != counts.0 { pendingCount = counts.0 }
+            if counts.1.map(\.id) != conflicts.map(\.id) { conflicts = counts.1 }
+            if !lastError.isEmpty { lastError = "" }
+            let next: String
+            if !replica.isConnected { next = "本机已保存，等待同步连接" }
+            else if !replica.hasSynced { next = "正在下载账号数据…" }
+            else if counts.0 > 0 { next = "还有 \(counts.0) 项修改待上传" }
+            else { next = "已同步" }
+            if status != next { status = next }
         } catch is CancellationError {
         } catch {
             guard version == generation else { return }
-            pendingCount = (try? target.pendingMutationCount()) ?? pendingCount
+            NotoLog.sync.error("sync failed, will retry: \(error.localizedDescription, privacy: .public)")
+            backoff = min(backoff * 2, Self.maxBackoff)
+            pendingCount = (try? await Task.detached { try target.pendingMutationCount() }.value) ?? pendingCount
             lastError = error.localizedDescription; status = "本机修改已保留，将自动重试"
         }
     }
@@ -163,7 +201,10 @@ public final class SyncController: ObservableObject {
             let count = try await Task.detached { try destination.importTasks(from: source) }.value
             if count > 0 { dataRevision += 1 }
             status = "已导入 \(count) 条本机任务，等待同步"; lastError = ""
-        } catch { lastError = error.localizedDescription }
+        } catch {
+            NotoLog.sync.error("import failed: \(error.localizedDescription, privacy: .public)")
+            lastError = error.localizedDescription
+        }
         isSyncing = false
         await syncNow()
     }
@@ -173,7 +214,10 @@ public final class SyncController: ObservableObject {
         do {
             try store.recoverConflict(id: id); dataRevision += 1; conflicts = try store.syncConflicts()
             await syncNow()
-        } catch { lastError = error.localizedDescription }
+        } catch {
+            NotoLog.sync.error("conflict recovery failed: \(error.localizedDescription, privacy: .public)")
+            lastError = error.localizedDescription
+        }
     }
 
     struct Acknowledgement: Sendable {
@@ -204,7 +248,7 @@ public final class SyncController: ObservableObject {
 
     private static func selectCLIStore(_ url: URL?) throws {
         #if os(macOS)
-        let pointer = Store.localURL.deletingLastPathComponent().appendingPathComponent("active-account.json")
+        let pointer = Store.activeAccountPointer
         if let url { try JSONEncoder().encode(url.path).write(to: pointer, options: .atomic) }
         else if FileManager.default.fileExists(atPath: pointer.path) { try FileManager.default.removeItem(at: pointer) }
         #endif

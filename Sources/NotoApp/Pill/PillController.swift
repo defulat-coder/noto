@@ -204,6 +204,8 @@ final class PillController: NSObject {
     private let defaults: UserDefaults
     private var started = false
     private var tick = 0
+    private let monitorLock = NSLock()
+    private var lastCursorEventAt: TimeInterval = 0
 
     init(appModel: AppModel, defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -249,13 +251,18 @@ final class PillController: NSObject {
         observers.append(center.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.syncWithSettings() }
         })
-        // 光标不会为了停在原地而产生事件，所以慢速轮询兜底；全局监视器负责快速响应移动。
-        pollTimer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.poll() }
-        }
-        if let pollTimer { RunLoop.main.add(pollTimer, forMode: .common) }
-        let handler: (NSEvent) -> Void = { [weak self] _ in
-            Task { @MainActor in self?.cursorMoved() }
+        // 光标不会为了停在原地而产生事件，所以低频轮询兜底；全局监视器负责快速响应移动。
+        // 数据不在这里轮询：AppModel 数据变化后主动推送（见 PillModel.refresh）。
+        startPollTimer()
+        let handler: (NSEvent) -> Void = { [weak self] event in
+            guard let self else { return }
+            // 高频鼠标事件先在投递线程节流，再跳 MainActor，避免每帧多次 hop。
+            monitorLock.lock()
+            let skip = event.timestamp - lastCursorEventAt < 1.0 / 90.0
+            if !skip { lastCursorEventAt = event.timestamp }
+            monitorLock.unlock()
+            guard !skip else { return }
+            Task { @MainActor in self.cursorMoved() }
         }
         if let global = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged], handler: handler) {
             mouseMonitors.append(global)
@@ -269,6 +276,15 @@ final class PillController: NSObject {
         syncWithSettings()
     }
 
+    private func startPollTimer() {
+        guard pollTimer == nil else { return }
+        pollTimer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.poll() }
+        }
+        pollTimer?.tolerance = 0.2
+        if let pollTimer { RunLoop.main.add(pollTimer, forMode: .common) }
+    }
+
     // MARK: - 面板生命周期
 
     private func syncWithSettings() {
@@ -278,6 +294,7 @@ final class PillController: NSObject {
         model.edge = savedEdge
         if enabled {
             if panel == nil { createPanel() }
+            startPollTimer()
             let glassy = defaults.string(forKey: "pillSurface") != "black" && PillGlass.available && !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
             panel?.appearance = glassy ? nil : NSAppearance(named: .darkAqua)
             reposition()
@@ -286,6 +303,7 @@ final class PillController: NSObject {
             if alwaysExpanded, panel?.isVisible == true { setExpanded(true, animate: false) }
             cursorMoved()
         } else {
+            pollTimer?.invalidate(); pollTimer = nil
             panel?.orderOut(nil)
             panel = nil
             hosting = nil
@@ -399,9 +417,10 @@ final class PillController: NSObject {
 
     private func poll() {
         tick += 1
-        cursorMoved()
-        if tick.isMultiple(of: 20) { updateForFullscreen() }
-        if tick.isMultiple(of: 40) { model.refresh() }
+        if panel?.isVisible == true { cursorMoved() }
+        // 通知之外的兜底检查：全屏状态 5 秒一次；跨午夜 60 秒一次（refresh 内部按版本/日期去重）。
+        if tick.isMultiple(of: 10) { updateForFullscreen() }
+        if tick.isMultiple(of: 120) { model.refresh() }
     }
 
     private func localCursor() -> CGPoint? {

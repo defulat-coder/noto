@@ -75,6 +75,7 @@ actor SupabaseAuth {
         request.httpBody = try JSONEncoder().encode(body)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            NotoLog.sync.error("auth request failed (\(path, privacy: .public), HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0))")
             throw NotoError("登录或续期失败，请检查账号、邮箱确认状态和网络。")
         }
         return try JSONDecoder().decode(T.self, from: data)

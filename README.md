@@ -2,6 +2,18 @@
 
 当前只维护 PC（macOS）客户端和本地 CLI。一个原生 macOS 小记与待办应用。一个输入入口，本地保存；需要时交给已安装的 AI CLI 整理。
 
+## 项目架构
+
+SwiftPM 多 target，依赖方向单向：`NotoCore ← NotoSync ← NotoApp`、`NotoCore ← NotoCLI`，无反向依赖。
+
+- **NotoCore**：数据模型（`Models.swift`）、SQLite 持久化与业务操作（`Store.swift`，搜索走 trigram FTS）、同步落库/outbox（`SyncStore.swift`）、AI CLI 调用（`Agent.swift`）、统一日志（`NotoLog.swift`）。不含 UI 与网络传输。
+- **NotoSync**：同步传输层——Supabase 认证、PowerSync 副本、自适应轮询与冲突处理（登录态下有待传 2s / 空闲 15s / 失败指数退避）。落库都在 NotoCore，因此 CLI 不依赖本模块。
+- **NotoApp**：macOS 主应用，按目录分层——`App/`（AppModel 按域拆分 + `TextDrafts` 输入草稿，逐键文本不触发整树刷新）、`Views/`（主窗口三视图与行组件）、`Input/`（NSTextView 桥与搜索框）、`Design/`（设计令牌与玻璃材质）、`Pill/`（屏幕边缘药丸，事件驱动）。
+- **NotoCLI**：`noto` 命令（ArgumentParser），与 App 共享同一个 Store；账号库指针 `active-account.json` 的路径常量收口在 `Store.activeAccountPointer`，由 NotoSync 写入。
+- **backend/**：Supabase 迁移、PowerSync sync-rules、本地开发栈与契约测试。
+
+脚本统一在 `scripts/`（构建、打包、QA 验证）；设计规约与验收历史在 `design/`。日志统一走 `os.Logger`（subsystem `noto`，category `sync` / `agent`），UI 层不打日志，CLI 的 print 是 JSON 契约。
+
 ## AI 工作目录
 
 正式数据保留在 Application Support；所有 AI 工具统一使用 Caches 下的 Noto 专用会话目录，按资料空间与会话隔离，上下文快照可重建；每轮运行文件使用系统临时目录并清理。详见 [AI 工作目录](design/AI-WORKSPACE.md)。
@@ -30,7 +42,7 @@
 
 「设置 → 外观」可选择悬停展开或始终展开、四个边缘及通透/纯黑表面。⌥ 拖动沿边缘调整位置，各边独立保存；右键也可以切边或隐藏。玻璃表面按 Codenotch 的大面积采样再裁剪方式绘制，不叠加自制把手、底色和描边。按住移动弧线可拖向另一条屏幕边缘。
 
-构建并启动真实应用：`./script/build_and_run.sh`；隔离示例：`./script/build_and_run.sh --preview --compact`。Codex Run 按钮调用同一脚本。实际 NSPanel 验收记录见 [屏幕边缘验收](design/EDGE-RUNTIME-QA.md)；最新材质与轮廓对照见 [液态玻璃对照](design/GLASS-PARITY-QA.md)。
+构建并启动真实应用：`./scripts/build_and_run.sh`；隔离示例：`./scripts/build_and_run.sh --preview --compact`。Codex Run 按钮调用同一脚本。实际 NSPanel 验收记录见 [屏幕边缘验收](design/EDGE-RUNTIME-QA.md)；最新材质与轮廓对照见 [液态玻璃对照](design/GLASS-PARITY-QA.md)。
 
 ## Codenotch 风格界面（2026-09-13）
 

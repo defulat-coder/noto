@@ -2,133 +2,6 @@ import SwiftUI
 import AppKit
 import NotoCore
 
-struct TaskDraftAttributes: Equatable {
-    var status = "pending"
-    var important = false
-    var due: String?
-}
-
-extension AppModel {
-    var visibleTasks: [Entry] {
-        if let cachedVisibleTasks { return cachedVisibleTasks }
-        let result = tasks.filter {
-            (!importantOnly || $0.priority == "important") &&
-            (!dueOnly || (!$0.completed && ($0.due.map { $0 <= Self.dateKey(Date()) } ?? false)))
-        }
-        cachedVisibleTasks = result
-        return result
-    }
-    var taskColumns: [String: [Entry]] {
-        if let cachedTaskColumns { return cachedTaskColumns }
-        let result = Dictionary(grouping: visibleTasks, by: { $0.status ?? "pending" })
-        cachedTaskColumns = result
-        return result
-    }
-    var taskDraftAttributes: TaskDraftAttributes {
-        TaskDraftAttributes(status: taskDraftStatus, important: taskDraftImportant,
-                            due: taskDraftHasDue ? Self.dateKey(taskDraftDate) : nil)
-    }
-    var taskDraftDirty: Bool { !taskDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || taskDraftAttributes != taskDraftBaseline }
-
-    func showDueTasks() {
-        guard leaveUnchangedEditor() else { return }
-        switchMode(.board)
-        importantOnly = false; search = ""; dueOnly = true
-    }
-
-    func switchMode(_ value: ContentMode) {
-        guard value != mode, leaveUnchangedEditor() else { return }
-        composerPosition = nil; readingRequested = true
-        mode = value; dueOnly = false; completedLimit = 20
-        if search.isEmpty { reload(reset: true) } else { search = "" }
-    }
-
-    func setImportantOnly(_ value: Bool) {
-        guard leaveUnchangedEditor() else { return }
-        importantOnly = value; completedLimit = 20
-    }
-
-    func showNewTask(status: String = "pending") {
-        if taskCreating { return }
-        guard leaveUnchangedEditor() else { return }
-        composerPosition = nil; readingRequested = true
-        taskDraftRestored = taskDraftStarted && taskDraftDirty
-        if !taskDraftRestored {
-            taskDraftStatus = status
-            taskDraftHasDue = mode == .calendar && !calendarUnscheduled
-            taskDraftDate = selectedCalendarDate
-            taskDraftImportant = false
-            taskDraftBaseline = taskDraftAttributes
-        }
-        taskDraftStarted = true; editError = ""; taskCreating = true
-    }
-
-    /// A fresh quick-entry adopts the clicked context; reopening a draft preserves its choices.
-    func quickCreateTask(status: String = "pending", date: Date? = nil) {
-        guard !taskCreating, !settings, !recentlyDeleted else { return }
-        let resuming = taskDraftStarted && taskDraftDirty
-        showNewTask(status: status)
-        guard taskCreating, !resuming else { return }
-        taskDraftHasDue = date != nil
-        if let date { taskDraftDate = date }
-        taskDraftImportant = importantOnly
-        taskDraftBaseline = taskDraftAttributes
-    }
-
-    func saveNewTask() {
-        guard !taskDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        do {
-            guard let store else { throw NotoError("无法打开本地数据，草稿已保留。") }
-            let entry = try store.add(kind: "todo", text: taskDraft,
-                                      due: taskDraftHasDue ? Self.dateKey(taskDraftDate) : nil,
-                                      status: taskDraftStatus, priority: taskDraftImportant ? "important" : "normal")
-            taskCreating = false; taskDraftStarted = false; taskDraft = ""; taskDraftHasDue = false; taskDraftImportant = false; taskDraftStatus = "pending"; taskDraftBaseline = TaskDraftAttributes(); taskDraftRestored = false
-            dueOnly = false
-            if !search.isEmpty { search = "" }
-            if importantOnly && entry.priority != "important" { importantOnly = false }
-            remember(before: [], after: [entry], message: "已添加任务。")
-            highlightedTaskID = entry.id
-            if mode == .calendar {
-                if let due = entry.due, let date = TaskDates.date(due) { selectedCalendarDate = date; calendarUnscheduled = false }
-                else { calendarUnscheduled = true }
-            }
-        } catch { editError = error.localizedDescription }
-    }
-
-    @discardableResult
-    func changeTask(_ entry: Entry, status: String? = nil, priority: String? = nil, due: String? = nil, clearDue: Bool = false) -> Bool {
-        guard leaveUnchangedEditor() else { return false }
-        do {
-            guard let store else { throw NotoError("无法打开本地数据。") }
-            let changed = try store.updateTodo(id: entry.id, due: due, clearDue: clearDue, status: status, priority: priority, expected: entry)
-            if changed != entry {
-                remember(before: [entry], after: [changed], message: "已更新任务。")
-                if conversation?.id == entry.id { conversation = changed }
-            }
-            return true
-        } catch { fail(error); reload(); return false }
-    }
-
-    func convertToTask(_ entry: Entry) {
-        guard leaveUnchangedEditor() else { return }
-        do {
-            guard let store else { throw NotoError("无法打开本地数据。") }
-            let changed = try store.convertToTodo(id: entry.id, expected: entry)
-            remember(before: [entry], after: [changed], message: "已转为任务。")
-            convertedTaskID = changed.id
-            if conversation?.id == changed.id { conversation = changed }
-        } catch { fail(error) }
-    }
-
-    func showConvertedTask() {
-        guard let id = convertedTaskID, leaveUnchangedEditor() else { return }
-        importantOnly = false; highlightedTaskID = id; taskToEditAfterReload = id
-        if mode == .board { reload(reset: true) } else { switchMode(.board) }
-    }
-
-
-}
-
 struct TaskCompletionButton: View {
     let entry: Entry
     @ObservedObject var model: AppModel
@@ -249,7 +122,7 @@ private struct TaskColumn: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .coordinateSpace(name: inputSpace)
-        .onPreferenceChange(OccupiedAreas.self) { occupied = $0 }
+        .onPreferenceChange(OccupiedAreas.self) { if $0 != occupied { occupied = $0 } }
         .background(BlankClickObserver(excluded: occupied, floatingRect: nil,
             onDoubleClick: { _ in model.quickCreateTask(status: status.rawValue) }, onOutsideClick: {}))
 
@@ -312,8 +185,9 @@ struct TaskCard: View {
 struct TaskEditor: View {
     @State private var confirmClose = false
     @ObservedObject var model: AppModel
+    @ObservedObject var drafts: TextDrafts
     private var creating: Bool { model.taskCreating }
-    private var text: Binding<String> { creating ? $model.taskDraft : $model.editDraft }
+    private var text: Binding<String> { creating ? $drafts.task : $drafts.edit }
     private var status: Binding<String> { creating ? $model.taskDraftStatus : $model.editStatus }
     private var important: Binding<Bool> { creating ? $model.taskDraftImportant : $model.editImportant }
     private var hasDue: Binding<Bool> { creating ? $model.taskDraftHasDue : $model.editHasDue }
@@ -388,8 +262,7 @@ struct TaskDateControl: View {
     @State private var selectedDate = Date()
     private var label: String {
         guard hasDue else { return "日期" }
-        let formatter = DateFormatter(); formatter.calendar = TaskDates.local; formatter.dateFormat = "M月d日"
-        return formatter.string(from: date)
+        return TaskDates.monthDayFormat(date)
     }
     private func choose(_ value: Date) { date = value; hasDue = true; open = false }
     var body: some View {

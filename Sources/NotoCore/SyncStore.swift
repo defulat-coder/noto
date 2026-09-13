@@ -2,6 +2,9 @@ import Foundation
 import CryptoKit
 import GRDB
 
+// 同步的本地落库层：outbox、ack、远端任务应用、冲突归档都持久化在这里（NotoCore），
+// 网络传输（RPC 上传、PowerSync 下载）在 NotoSync。CLI 不依赖 NotoSync 也能读写同一套库。
+
 public struct SyncMutation: Codable, FetchableRecord, Sendable {
     public let mutationID: String
     public let entryID: String
