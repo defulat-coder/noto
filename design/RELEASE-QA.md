@@ -12,6 +12,6 @@
 
 本机应用已安装至 `/Applications/Noto.app`，安装后的签名完整性验证通过。
 
-GitHub Actions [34251419454](https://github.com/defulat-coder/noto/actions/runs/34251419454) 两个架构均成功：macos-15/arm64 和 macos-15-intel/x86_64 各自通过 Swift 测试、CLI 回归、DMG 生成与上传。下载后两个架构 SHA-256 校验和 DMG 完整性检查通过；云端 arm64 包的应用签名完整性验证通过。
+GitHub Actions [34251419454](https://github.com/indie-builder/noto/actions/runs/34251419454) 两个架构均成功：macos-15/arm64 和 macos-15-intel/x86_64 各自通过 Swift 测试、CLI 回归、DMG 生成与上传。下载后两个架构 SHA-256 校验和 DMG 完整性检查通过；云端 arm64 包的应用签名完整性验证通过。
 
-首个 [公开预览 Release](https://github.com/defulat-coder/noto/releases/tag/preview-0.1.0) 使用该次 CI 产物。正式签名、公证路径仍待 Apple 凭据；本次明确标为未公证预览版。
+首个 [公开预览 Release](https://github.com/indie-builder/noto/releases/tag/preview-0.1.0) 使用该次 CI 产物。正式签名、公证路径仍待 Apple 凭据；本次明确标为未公证预览版。
